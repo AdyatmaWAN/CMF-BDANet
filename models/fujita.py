@@ -5,12 +5,15 @@ from tensorflow.keras.regularizers import l1_l2, l2
 from tensorflow.keras.backend import abs
 import tensorflow.keras.backend as K
 
+from models.ordinal import add_coral_head
+
 tensorflow.random.set_seed(1234)
 
 class snn:
-    def __init__(self, num_of_class, input_shape):
+    def __init__(self, num_of_class, input_shape, ordinal=False):
         self.n_class = num_of_class
         self.input_shape = input_shape
+        self.ordinal = ordinal
 
 
     def __build_siamese_model(self):
@@ -37,20 +40,25 @@ class snn:
 
         merged = Concatenate()([feat_a, feat_b])
 
-        # Binary classification is represented as either num_of_class == 1
-        # (this repo's convention) or == 2 (the original Fujita convention,
-        # i.e. two classes rather than one output unit) - both must produce
-        # a single sigmoid unit, never a softmax over 1 or 2 dense units.
-        if self.n_class in (1, 2):
-            actv = "sigmoid"
-            units = 1
-        else:
-            actv = "softmax"
-            units = self.n_class
-
         fc = Dense(128, activation='relu')(merged)
         fc = Dropout(0.5)(fc)  # Added dropout layer
-        outputs = Dense(units, activation=actv)(fc)
+
+        if self.ordinal:
+            # CORAL ordinal head (see models/ordinal.py) - requires n_class >= 3.
+            outputs = add_coral_head(fc, self.n_class)
+        else:
+            # Binary classification is represented as either num_of_class == 1
+            # (this repo's convention) or == 2 (the original Fujita convention,
+            # i.e. two classes rather than one output unit) - both must produce
+            # a single sigmoid unit, never a softmax over 1 or 2 dense units.
+            if self.n_class in (1, 2):
+                actv = "sigmoid"
+                units = 1
+            else:
+                actv = "softmax"
+                units = self.n_class
+            outputs = Dense(units, activation=actv)(fc)
+
         model = Model(inputs=[img_a, img_b], outputs=outputs)
 
         return model
@@ -66,3 +74,8 @@ if __name__ == "__main__":
         )
         assert (units, actv) == (expected_units, expected_actv), (num_of_class, units, actv)
     print("fujita.snn self-check OK: num_of_class in {1, 2} -> sigmoid(1), else -> softmax(n)")
+
+    ordinal_model = snn(5, (16, 16, 1), ordinal=True).get_model()
+    assert ordinal_model.output_shape[-1] == 4, ordinal_model.output_shape  # K-1 thresholds
+    assert ordinal_model.layers[-1].__class__.__name__ == "CoralBiases", ordinal_model.layers[-1]
+    print("fujita.snn ordinal self-check OK: num_of_class=5, ordinal=True -> CoralBiases(4 thresholds)")

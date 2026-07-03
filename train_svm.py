@@ -38,6 +38,7 @@ from sklearn.utils import class_weight  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
+    aggregate_scenarios_after_run,
     build_predictions_frame,
     compute_f2,
     dsm_mode_channels,
@@ -270,6 +271,8 @@ def main() -> None:
     if all_results:
         os.makedirs(results_root, exist_ok=True)
         pd.DataFrame(all_results).to_csv(os.path.join(results_root, "SVM_grid_summary.csv"), index=False)
+
+    aggregate_scenarios_after_run(results_root, scenarios)
 
 
 if __name__ == "__main__":

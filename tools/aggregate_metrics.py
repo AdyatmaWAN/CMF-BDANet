@@ -167,6 +167,35 @@ def _write(df: pd.DataFrame, out_csv: Path, out_xlsx: Path) -> None:
         print(f"Wrote {out_csv} (failed to write {out_xlsx}: {e})")
 
 
+def aggregate_and_write(results_root: Path, best_metric: str = "f1") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run both aggregation stages over everything under `results_root` and
+    write their CSV/XLSX outputs directly under it (`aggregated_metrics.*`,
+    `best_overall.*`). This is the single entrypoint both the CLI below and
+    every `train_*.py` script's automatic post-run aggregation call into —
+    point it at `results/scenario_N/` to scope it to one scenario across
+    every model, or at `results/` for an all-scenarios view.
+
+    Returns (per_ablation_best, best_overall); both empty if no metrics.csv
+    was found under results_root.
+    """
+    per_ablation_best = aggregate_metrics(results_root, best_metric=best_metric)
+    if per_ablation_best.empty:
+        return per_ablation_best, per_ablation_best
+
+    _write(
+        per_ablation_best,
+        results_root / "aggregated_metrics.csv",
+        results_root / "aggregated_metrics.xlsx",
+    )
+    best_overall = select_best_overall(per_ablation_best, best_metric=best_metric)
+    _write(
+        best_overall,
+        results_root / "best_overall.csv",
+        results_root / "best_overall.xlsx",
+    )
+    return per_ablation_best, best_overall
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", type=str, default="results", help="Path to results root")
@@ -181,22 +210,10 @@ def main():
         print(f"Results path does not exist: {results_root}")
         return
 
-    per_ablation_best = aggregate_metrics(results_root, best_metric=args.best_metric)
+    per_ablation_best, best_overall = aggregate_and_write(results_root, best_metric=args.best_metric)
     if per_ablation_best.empty:
         print("No data aggregated.")
         return
-    _write(
-        per_ablation_best,
-        results_root / "aggregated_metrics.csv",
-        results_root / "aggregated_metrics.xlsx",
-    )
-
-    best_overall = select_best_overall(per_ablation_best, best_metric=args.best_metric)
-    _write(
-        best_overall,
-        results_root / "best_overall.csv",
-        results_root / "best_overall.xlsx",
-    )
 
     print(f"Aggregated {len(per_ablation_best)} ablation-config rows; {len(best_overall)} best-overall rows.")
 

@@ -9,9 +9,15 @@ a 1-unit sigmoid head (this pipeline's convention represents binary
 scenarios as num_classes == 1); anything else gets a softmax head. See
 models/fujita.py for the self-check.
 
+Scenario 5 is the ordinal-regression version of scenario 3's data (same 5
+classes, no row filtering) - see utils/label_processing.py::is_ordinal_scenario
+and models/ordinal.py's CORAL head for the mechanics, and the README's
+"Ordinal regression (scenario 5)" section for the full explanation.
+
 Usage:
     python train_fujita.py
     python train_fujita.py --config configs/fujita.json --scenario 1
+    python train_fujita.py --scenario 5   # ordinal regression (CORAL)
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import pandas as pd  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
+    aggregate_scenarios_after_run,
     dsm_mode_channels,
     grid_search,
     make_siamese_dsm_dataset,
@@ -39,7 +46,13 @@ from utils.experiment import (  # noqa: E402
 from models import fujita as baseline_fujita  # noqa: E402
 from models.fcsnn import load_dataset  # noqa: E402
 from models.mmfemsnet import resolve_dsm_channel_indices  # noqa: E402
-from utils.label_processing import prepare_split_with_indices  # noqa: E402
+from models.ordinal import (  # noqa: E402
+    coral_probs_to_class_probs,
+    decode_coral_predictions,
+    decode_coral_true_labels,
+    ordinal_extra_metrics,
+)
+from utils.label_processing import is_ordinal_scenario, prepare_split_with_indices  # noqa: E402
 
 set_tf_determinism()
 
@@ -81,21 +94,31 @@ def train_one(
     X_train, Y_train, X_val, Y_val, X_test, Y_test, test_indices,
 ) -> Dict:
     include_density, include_unc = dsm_mode_channels(dsm_mode)
+    ordinal = is_ordinal_scenario(scenario)
 
     print(
         f"\n===== [FUJITA] scenario={scenario} dataset={dataset_name} dsm={dsm_mode} "
-        f"opt={optimizer} lr={learning_rate} bs={batch_size} ====="
+        f"opt={optimizer} lr={learning_rate} bs={batch_size} ordinal={ordinal} ====="
     )
 
-    train_ds = make_siamese_dsm_dataset(X_train, Y_train, batch_size, True, include_density, include_unc, seed)
-    val_ds = make_siamese_dsm_dataset(X_val, Y_val, batch_size, False, include_density, include_unc, seed)
-    test_ds = make_siamese_dsm_dataset(X_test, Y_test, batch_size, False, include_density, include_unc, seed)
+    train_ds = make_siamese_dsm_dataset(
+        X_train, Y_train, batch_size, True, include_density, include_unc, seed,
+        ordinal=ordinal, num_classes=num_classes,
+    )
+    val_ds = make_siamese_dsm_dataset(
+        X_val, Y_val, batch_size, False, include_density, include_unc, seed,
+        ordinal=ordinal, num_classes=num_classes,
+    )
+    test_ds = make_siamese_dsm_dataset(
+        X_test, Y_test, batch_size, False, include_density, include_unc, seed,
+        ordinal=ordinal, num_classes=num_classes,
+    )
 
     H, W = X_train.shape[1], X_train.shape[2]
     dsm_channels = len(resolve_dsm_channel_indices(include_density, include_unc)[0])
 
     set_tf_determinism(seed)
-    model = baseline_fujita.snn(num_classes, (H, W, dsm_channels)).get_model()
+    model = baseline_fujita.snn(num_classes, (H, W, dsm_channels), ordinal=ordinal).get_model()
 
     return train_and_evaluate_nn(
         result_dir=result_dir,
@@ -110,7 +133,13 @@ def train_one(
         test_indices=test_indices,
         epochs=epochs,
         callback_cfg=callback_cfg,
+        loss="binary_crossentropy" if ordinal else None,
+        decode_pred_fn=decode_coral_predictions if ordinal else None,
+        decode_true_fn=decode_coral_true_labels if ordinal else None,
+        class_probs_fn=coral_probs_to_class_probs if ordinal else None,
+        extra_metrics_fn=ordinal_extra_metrics if ordinal else None,
         extra_summary={
+            "ordinal": ordinal,
             "scenario": scenario,
             "dataset": dataset_name,
             "dsm_mode_tag": dsm_mode,
@@ -122,7 +151,7 @@ def train_one(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/fujita.json")
-    parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4])
+    parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
     return parser.parse_args()
 
@@ -178,6 +207,8 @@ def main() -> None:
     if all_results:
         os.makedirs(results_root, exist_ok=True)
         pd.DataFrame(all_results).to_csv(os.path.join(results_root, "FUJITA_grid_summary.csv"), index=False)
+
+    aggregate_scenarios_after_run(results_root, scenarios)
 
 
 if __name__ == "__main__":

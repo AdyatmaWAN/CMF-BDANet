@@ -19,7 +19,7 @@ classification scenarios:
 | 2 | binary | classes {0,1,2,3} vs class 4 | all 5 |
 | 3 | multiclass | all 5 classes (nominal — classes are unordered categories) | all 5 |
 | 4 | binary | classes {0,1} vs {2,3,4} | all 5 |
-| 5 | ordinal regression | same 5 classes as scenario 3, but the model is trained to respect their order (0 < 1 < 2 < 3 < 4) instead of treating them as unordered categories | MMF-EMSNet only, for now |
+| 5 | ordinal regression | same 5 classes as scenario 3, but the model is trained to respect their order (0 < 1 < 2 < 3 < 4) instead of treating them as unordered categories | FCSNN, MMF-EMSNet, FUJITA (not the SVM baselines, no clean CORAL-for-SVM equivalent) |
 
 Scenario 5 is explained in full in [Ordinal regression (scenario 5)](#ordinal-regression-scenario-5) below.
 
@@ -35,8 +35,9 @@ configs/            One JSON config per model family (grid definitions)
 models/              Model definitions + shared data-loading
   fcsnn.py           FCSNN model + load_dataset() (NPZ loader used by every script)
   mmfemsnet.py       MMF-EMSNet model + DSM/RGB channel extraction + tf.data pipeline
-                     + the CORAL ordinal head (CoralBiases) and its label encode/decode
   fujita.py          FUJITA baseline model
+  ordinal.py         Shared CORAL ordinal head (CoralBiases, add_coral_head) + label
+                     encode/decode, used by fcsnn.py, mmfemsnet.py, and fujita.py
   Moya.py            Moya SVM feature extractor (feature_difference)
   Hajeb.py           Hajeb SVM feature extractor (dsm_difference)
 
@@ -92,19 +93,22 @@ config's `hpo_grid` × `ablation_grid`, it trains on `X_train`/`Y_train`
 python train_fcsnn.py                                    # full grid, all scenarios
 python train_fcsnn.py --scenario 1                        # just scenario 1
 python train_fcsnn.py --scenario 4                        # the {0,1} vs {2,3,4} binary scenario
+python train_fcsnn.py --scenario 5 --residual true --fusion mcmaf   # ordinal regression (CORAL)
 python train_fcsnn.py --dsm-mode dsm_only                 # just one DSM mode
 python train_mmfemsnet.py --variant 4stream                # just the 4-stream MMF variant
-python train_mmfemsnet.py --scenario 5                     # ordinal regression (CORAL) — MMF-EMSNet only
-python train_fujita.py --config configs/fujita.json
+python train_mmfemsnet.py --scenario 5                     # ordinal regression (CORAL)
+python train_fujita.py --scenario 5                        # ordinal regression (CORAL)
 python train_svm.py --model Moya --scenario 2              # just Moya, scenario 2
 ```
 
 Scenarios 1-4 work identically across all four scripts. Scenario 5 (ordinal
-regression) is currently only wired up for `train_mmfemsnet.py` — its
-`--scenario` choices are `[1,2,3,4,5]`, the other three scripts' are
-`[1,2,3,4]`, so passing `--scenario 5` to `train_fcsnn.py`/`train_fujita.py`/
-`train_svm.py` fails fast with an argparse error instead of silently
-training a plain nominal classifier under an ordinal-sounding scenario number.
+regression via CORAL) is wired up for the three neural nets —
+`train_fcsnn.py`, `train_mmfemsnet.py`, `train_fujita.py` all accept
+`--scenario 5` and share the same `models/ordinal.py` head. `train_svm.py`
+does not (`--scenario` choices are `[1,2,3,4]`) since there's no clean CORAL
+equivalent for the SVM baselines — passing `--scenario 5` to it fails fast
+with an argparse error rather than silently training something else under
+an ordinal-sounding scenario number.
 
 **Resuming:** every run's result directory already encodes its full set of
 parameters, so "already trained" simply means `metrics.csv` exists there
@@ -198,6 +202,21 @@ It groups by exclusion: any column that isn't a known hyperparameter
 the ablation identity — so adding a new model or a new ablation column
 needs no code changes here.
 
+**This also runs automatically, scoped to one scenario at a time.** Every
+`train_*.py` script calls `utils/experiment.py::aggregate_scenarios_after_run`
+at the end of `main()`, which re-runs both aggregation stages — but pointed
+at `results/scenario_N/` instead of all of `results/` — for every scenario
+that was part of the run. Since every model's results already live nested
+under `results/scenario_N/{MODEL}/...`, scoping the scan that way picks up
+*every* model that has ever been trained for that scenario, not just the one
+that just finished. So training FCSNN for scenario 4, then later training
+MMF-EMSNet for scenario 4, leaves
+`results/scenario_4/aggregated_metrics.csv` and `best_overall.csv` reflecting
+both models — no manual aggregation step needed. This is on by default and
+unconditional (it re-scans even if every run in this invocation was skipped
+as already-trained, since the point is to keep the aggregate current, not to
+gate it on this specific invocation having done new work).
+
 ## Ordinal regression (scenario 5)
 
 ### The problem with plain multiclass for ordered classes
@@ -212,7 +231,11 @@ increasing damage severity — so a model that mixes up adjacent classes
 (1 vs 2) is behaving much better than one that mixes up opposite ends (0 vs
 4), and neither the loss nor accuracy/macro-F1 can tell the difference.
 Scenario 5 reuses scenario 3's exact data but trains and evaluates the model
-in a way that's aware of this order.
+in a way that's aware of this order. It's available for all three neural
+nets — FCSNN, MMF-EMSNet, FUJITA — all sharing the same CORAL head from
+`models/ordinal.py`. It's not available for the SVM baselines (Moya/Hajeb):
+`SVC` has no clean CORAL-style ordinal equivalent, so `train_svm.py`
+doesn't accept `--scenario 5`.
 
 ### CORAL: turning K classes into K-1 ordered yes/no questions
 
@@ -235,7 +258,7 @@ Q3: "Is the damage worse than class 3?"   -> P(y > 3)
 
 A true class of 2 means "yes" to Q0 and Q1, "no" to Q2 and Q3 — i.e. the
 label `2` gets **encoded** as the binary vector `[1, 1, 0, 0]`
-(`encode_coral_labels` in `models/mmfemsnet.py`). Answering all 4 questions
+(`encode_coral_labels` in `models/ordinal.py`). Answering all 4 questions
 and counting how many are "yes" recovers the class: `sum([1,1,0,0]) = 2`.
 This is exactly how prediction works too (`decode_coral_predictions`):
 count how many of the 4 sigmoid outputs exceed 0.5.
@@ -252,7 +275,7 @@ a logical contradiction (if it's worse than 2, it must also be worse than
   **shared logit**, `z = w·g(x)`.
 - Each threshold only adds its own **bias**: `logit_k = z + bias_k`.
 - The 4 biases are forced non-increasing (`bias_0 ≥ bias_1 ≥ bias_2 ≥
-  bias_3`) via `CoralBiases` in `models/mmfemsnet.py`: `bias_k = bias_0 -
+  bias_3`) via `CoralBiases` in `models/ordinal.py`: `bias_k = bias_0 -
   cumsum(softplus(gap_1..gap_k))`. `softplus` always returns a positive
   number, so each cumulative sum can only grow, so each `bias_k` can only
   shrink as `k` increases. Gradient descent is free to move `bias_0` and the
@@ -261,6 +284,11 @@ a logical contradiction (if it's worse than 2, it must also be worse than
   Since a bigger threshold `k` always has a `≤` logit, its sigmoid
   probability `P(y>k)` is always `≤` the previous threshold's — the 4
   answers can never contradict each other.
+- `add_coral_head(x, num_classes)` in `models/ordinal.py` wires the shared
+  `Dense(1, use_bias=False)` + `CoralBiases` pair onto a model's penultimate
+  feature tensor `x` in one call — `models/fcsnn.py`, `models/mmfemsnet.py`,
+  and `models/fujita.py` all use this same function for their `ordinal=True`
+  head, so there's exactly one CORAL implementation, not three.
 
 ### The loss function
 
@@ -284,11 +312,12 @@ In code this needs no custom loss function at all: Keras's built-in
 `"binary_crossentropy"` string loss, applied to a model output of shape
 `(batch, 4)` against an encoded target of shape `(batch, 4)`, already
 computes exactly this — elementwise BCE across all 4 thresholds, averaged
-over the batch (`train_mmfemsnet.py` passes `loss="binary_crossentropy"`
+over the batch. Every ordinal-capable script (`train_fcsnn.py`,
+`train_mmfemsnet.py`, `train_fujita.py`) passes `loss="binary_crossentropy"`
 whenever `is_ordinal_scenario(scenario)` is true; `train_and_evaluate_nn`'s
 auto-selected loss would otherwise pick `sparse_categorical_crossentropy`
 for a 5-class problem, which is wrong here since the labels aren't
-sparse integers anymore, they're the 4-column encoded matrix).
+sparse integers anymore, they're the 4-column encoded matrix.
 
 **Why summing/averaging 4 BCE terms is the right objective:** each
 threshold's sigmoid output is trained completely independently by its own
@@ -339,6 +368,8 @@ This is the module every `train_*.py` script is built on:
 - `DSM_MODES` / `dsm_mode_channels()` — the shared dsm_mode ablation axis.
 - `make_siamese_dsm_dataset()` — the (pre-DSM, post-DSM) tf.data pipeline
   shared by FCSNN and FUJITA (both take the same two-tensor input shape).
+  Accepts the same `ordinal`/`num_classes` pair as `models/mmfemsnet.py`'s
+  `make_dataset()` to CORAL-encode `Y` before building the dataset.
 - `make_training_callbacks()` — early stopping / checkpointing / LR
   reduction, all monitoring a custom `val_f1` metric computed each epoch
   (not `val_loss`). Accepts optional `decode_pred_fn`/`decode_true_fn` hooks
@@ -353,13 +384,17 @@ This is the module every `train_*.py` script is built on:
   logic inline.) Five optional parameters — `loss`, `decode_pred_fn`,
   `decode_true_fn`, `class_probs_fn`, `extra_metrics_fn` — all default to
   `None` and reproduce today's nominal-classification behavior exactly;
-  `train_mmfemsnet.py` supplies CORAL-specific versions of all five only
-  when `is_ordinal_scenario(scenario)` is true.
+  `train_fcsnn.py`/`train_mmfemsnet.py`/`train_fujita.py` each supply
+  CORAL-specific versions of all five (from `models/ordinal.py`) only when
+  `is_ordinal_scenario(scenario)` is true.
 - `grid_search()` — iterates `ablation_grid × hpo_grid`, builds each run's
   result directory, skips already-trained combos, and catches/logs
   per-run exceptions without aborting the whole sweep.
 - `build_predictions_frame()`, `compute_f2()`, `save_classification_report()`
   — shared result-saving helpers used identically by every script.
+- `aggregate_scenarios_after_run()` — called once at the end of every
+  script's `main()`; re-aggregates each scenario the run touched (see
+  [Aggregating results](#aggregating-results)).
 
 ## Archive
 

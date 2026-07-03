@@ -100,13 +100,27 @@ def dsm_mode_channels(dsm_mode: str) -> tuple[bool, bool]:
 # ============================================================
 
 
-def make_siamese_dsm_dataset(X, Y, batch_size: int, shuffle: bool, include_density: bool, include_unc: bool, seed: int = SEED):
+def make_siamese_dsm_dataset(
+    X, Y, batch_size: int, shuffle: bool, include_density: bool, include_unc: bool, seed: int = SEED,
+    ordinal: bool = False, num_classes: int | None = None,
+):
     """tf.data pipeline shared by FCSNN and FUJITA: both take a (pre-DSM, post-DSM)
     input pair selected via the DSM-mode channel flags, with no RGB stream.
+
+    ordinal: If True, encode Y into CORAL's (N, num_classes-1) binary target
+        matrix (see models/ordinal.py::encode_coral_labels) instead of
+        leaving it as plain integer labels. Requires num_classes.
     """
     import tensorflow as tf
 
     from models.mmfemsnet import resolve_dsm_channel_indices
+
+    if ordinal:
+        if num_classes is None:
+            raise ValueError("num_classes is required when ordinal=True")
+        from models.ordinal import encode_coral_labels
+
+        Y = encode_coral_labels(Y, num_classes)
 
     pre_idx, post_idx = resolve_dsm_channel_indices(include_density, include_unc)
     ds = tf.data.Dataset.from_tensor_slices(((X[..., pre_idx], X[..., post_idx]), Y))
@@ -511,3 +525,37 @@ def grid_search(
                 print(f"Run failed; logged to {os.path.join(result_dir, 'error.log')}")
                 continue
     return results
+
+
+# ============================================================
+# Post-run aggregation
+# ============================================================
+
+
+def aggregate_scenarios_after_run(results_root: str, scenarios: Sequence[int], best_metric: str = "f1") -> None:
+    """Call once at the end of a train_*.py script's main(): re-aggregate
+    every scenario that was part of this run, across every model that has
+    results there (not just the one that just trained), so
+    `results/scenario_N/aggregated_metrics.csv` and `best_overall.csv` stay
+    current without a separate manual `tools/aggregate_metrics.py` step.
+
+    Scoping the scan to `results/scenario_N/` rather than all of `results/`
+    is what makes this "models in the same scenario" rather than
+    all-scenarios-mixed-together — every model's results already live nested
+    under that per-scenario directory (see each train_*.py's build_result_dir).
+    """
+    from pathlib import Path
+
+    from tools.aggregate_metrics import aggregate_and_write
+
+    for scenario in scenarios:
+        scenario_root = Path(results_root) / f"scenario_{scenario}"
+        if not scenario_root.exists():
+            continue
+        per_ablation_best, best_overall = aggregate_and_write(scenario_root, best_metric=best_metric)
+        if per_ablation_best.empty:
+            continue
+        print(
+            f"[aggregate] scenario {scenario}: {len(per_ablation_best)} ablation-config rows, "
+            f"{len(best_overall)} best-overall rows -> {scenario_root / 'aggregated_metrics.csv'}"
+        )

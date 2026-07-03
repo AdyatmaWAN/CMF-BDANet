@@ -17,6 +17,8 @@ import tensorflow as tf
 from tensorflow.keras import layers, Model
 from tensorflow.keras.regularizers import l2
 
+from models.ordinal import add_coral_head
+
 # Global seed for deterministic initializers inside this module
 SEED = 1234
 tf.random.set_seed(SEED)
@@ -35,7 +37,8 @@ class FCSNN:
     Args:
         num_of_class: Number of classes for classification.
                       - 1 → binary (sigmoid)
-                      - >1 → multi-class (softmax)
+                      - >1 → multi-class (softmax), or ordinal (CORAL) when
+                        ordinal=True
         residual: If True, concatenates flattened intermediate features.
         dropout: If True, enables dropout after pooling/dense.
         dense: If True, adds dense layers before final head.
@@ -45,6 +48,9 @@ class FCSNN:
         substraction: If True, use absolute difference of embeddings;
                       otherwise, concatenate embeddings.
         shared: If True, share Siamese tower; else use separate towers.
+        ordinal: If True, replace the sigmoid/softmax head with a CORAL
+                 ordinal head (see models/ordinal.py). Requires
+                 num_of_class >= 3.
     """
 
     def __init__(
@@ -58,6 +64,7 @@ class FCSNN:
         substraction: bool,
         shared: bool,
         fusion: str = "concat",
+        ordinal: bool = False,
     ) -> None:
         self.n_class = num_of_class
         self.is_residual = residual
@@ -68,6 +75,7 @@ class FCSNN:
         self.substraction = substraction
         self.shared = shared
         self.fusion = fusion
+        self.ordinal = ordinal
 
     def __build_siamese_model(self) -> Model:
         """
@@ -132,8 +140,9 @@ class FCSNN:
         Build the full FCSNN model with two inputs (preDSM, postDSM) and a head.
 
         Behavior:
-            - If n_class == 1 → Dense(1, sigmoid)  (binary)
-            - If n_class > 1 → Dense(n_class, softmax) (multi-class)
+            - If ordinal=True → CORAL ordinal head (see models/ordinal.py)
+            - Elif n_class == 1 → Dense(1, sigmoid)  (binary)
+            - Elif n_class > 1 → Dense(n_class, softmax) (multi-class)
         """
         img_a = layers.Input(self.input_shape, name="input_pre_dsm")
         img_b = layers.Input(self.input_shape, name="input_post_dsm")
@@ -165,20 +174,23 @@ class FCSNN:
             gates = tf.nn.softmax(scores, axis=1)
             distance = tf.reduce_sum(tokens * gates, axis=1)
 
-        if self.n_class == 1:
-            actv = "sigmoid"
-            units = 1
+        if self.ordinal:
+            out = add_coral_head(distance, self.n_class, seed=SEED)
         else:
-            actv = "softmax"
-            units = self.n_class
+            if self.n_class == 1:
+                actv = "sigmoid"
+                units = 1
+            else:
+                actv = "softmax"
+                units = self.n_class
 
-        out = layers.Dense(
-            units,
-            activation=actv,
-            kernel_regularizer=l2(1e-4),
-            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
-            name="output",
-        )(distance)
+            out = layers.Dense(
+                units,
+                activation=actv,
+                kernel_regularizer=l2(1e-4),
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+                name="output",
+            )(distance)
 
         model = Model(inputs=[img_a, img_b], outputs=out, name="FCSNN")
         return model

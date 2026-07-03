@@ -13,8 +13,8 @@ redundant 4-stream/no-concat duplicate of 4-stream/concat.
 
 Scenario 5 is the ordinal-regression version of scenario 3's data (same 5
 classes, no row filtering) - see utils/label_processing.py::is_ordinal_scenario
-and models/mmfemsnet.py's CoralBiases head for the mechanics, and the
-README's "Ordinal regression (scenario 5)" section for the full explanation.
+and models/ordinal.py's CORAL head for the mechanics, and the README's
+"Ordinal regression (scenario 5)" section for the full explanation.
 
 Usage:
     python train_mmfemsnet.py
@@ -30,8 +30,6 @@ import json
 import os
 from typing import Dict, Tuple
 
-import numpy as np
-
 from utils.experiment import set_global_determinism
 
 set_global_determinism()
@@ -40,6 +38,7 @@ import pandas as pd  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
+    aggregate_scenarios_after_run,
     dsm_mode_channels,
     grid_search,
     set_tf_determinism,
@@ -48,13 +47,16 @@ from utils.experiment import (  # noqa: E402
 from models.fcsnn import load_dataset  # noqa: E402
 from models.mmfemsnet import (  # noqa: E402
     build_mmf_emsnet_conv,
-    coral_probs_to_class_probs,
-    decode_coral_predictions,
     make_dataset as make_mmf_dataset,
     resolve_dsm_channel_indices,
 )
+from models.ordinal import (  # noqa: E402
+    coral_probs_to_class_probs,
+    decode_coral_predictions,
+    decode_coral_true_labels,
+    ordinal_extra_metrics,
+)
 from utils.label_processing import is_ordinal_scenario, prepare_split_with_indices  # noqa: E402
-from utils.metrics import compute_ordinal_metrics  # noqa: E402
 
 set_tf_determinism()
 
@@ -70,19 +72,6 @@ def decode_variant(variant: str) -> Tuple[bool, bool]:
     if variant == "3stream_no_concat":
         return False, False
     raise ValueError(f"Unknown MMF variant: {variant}")
-
-
-def _decode_coral_true(y_encoded: np.ndarray) -> np.ndarray:
-    """True CORAL-encoded labels are exact (no thresholding uncertainty):
-    exactly `rank` of the `num_classes - 1` entries are 1, so summing
-    recovers the original integer rank directly.
-    """
-    return np.sum(np.asarray(y_encoded), axis=-1).astype(np.int64)
-
-
-def _ordinal_extra_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
-    mae, qwk = compute_ordinal_metrics(y_true, y_pred)
-    return {"mae": mae, "qwk": qwk}
 
 
 def build_result_dir(
@@ -184,9 +173,9 @@ def train_one(
         callback_cfg=callback_cfg,
         loss="binary_crossentropy" if ordinal else None,
         decode_pred_fn=decode_coral_predictions if ordinal else None,
-        decode_true_fn=_decode_coral_true if ordinal else None,
+        decode_true_fn=decode_coral_true_labels if ordinal else None,
         class_probs_fn=coral_probs_to_class_probs if ordinal else None,
-        extra_metrics_fn=_ordinal_extra_metrics if ordinal else None,
+        extra_metrics_fn=ordinal_extra_metrics if ordinal else None,
         extra_summary={
             "ordinal": ordinal,
             "scenario": scenario,
@@ -270,6 +259,8 @@ def main() -> None:
     if all_results:
         os.makedirs(results_root, exist_ok=True)
         pd.DataFrame(all_results).to_csv(os.path.join(results_root, "MMF_grid_summary.csv"), index=False)
+
+    aggregate_scenarios_after_run(results_root, scenarios)
 
 
 if __name__ == "__main__":
