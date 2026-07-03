@@ -29,7 +29,7 @@ from utils.label_processing import prepare_split_for_scenario
 from utils.metrics import compute_metrics
 from models.snn import load_dataset
 
-# Global determinism settings matching run_all_hpo.py
+# Global determinism settings matching the train_*.py grid-search scripts
 SEED = 1234
 os.environ["PYTHONHASHSEED"] = str(SEED)
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
@@ -46,7 +46,7 @@ tf.random.set_seed(SEED)
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
-# Training/Optimization constants matching run_all_hpo.py
+# Training/Optimization constants matching the train_*.py grid-search scripts
 EARLY_STOPPING_PATIENCE: int = 12
 LR_REDUCE_PATIENCE: int = 6
 LR_REDUCE_FACTOR: float = 0.5
@@ -247,7 +247,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# load_npz_data removed to match run_all_hpo.py loading system
+# load_npz_data removed to match the shared NPZ loading system (models/snn.py::load_dataset)
 
 
 def get_optimizer(name: str, lr: float) -> tf.keras.optimizers.Optimizer:
@@ -331,7 +331,7 @@ def main() -> None:
     )
     dsm_channels = len(pre_idx)
     
-    # 1. Load data matching run_all_hpo.py loading system
+    # 1. Load data using the shared NPZ loading system
     print(f"Loading dataset from: {args.dataset}")
     (
         X_train_raw,

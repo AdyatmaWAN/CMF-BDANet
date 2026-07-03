@@ -1,0 +1,372 @@
+"""
+Shared training-pipeline utilities used by every `train_*.py` grid-search
+script: determinism setup, DSM-mode metadata, optimizer/callback factories,
+prediction/report saving, and the generic grid-search driver.
+
+IMPORTANT: `set_global_determinism()` only touches env vars/RNGs and must be
+called before `import tensorflow`. Nothing at module import time here pulls
+in TensorFlow — it's imported lazily inside the functions that need it — so
+importing this module is always safe to do first.
+"""
+
+from __future__ import annotations
+
+import itertools
+import os
+import random
+import traceback
+from typing import Callable, Dict, List, Sequence
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import classification_report, fbeta_score
+
+from utils.metrics import compute_metrics
+
+SEED = 1234
+
+
+# ============================================================
+# Determinism
+# ============================================================
+
+
+def set_global_determinism(seed: int = SEED) -> None:
+    """Set env vars + seed stdlib/numpy RNGs. Call before `import tensorflow`."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["TF_DETERMINISTIC_OPS"] = "1"
+    os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
+    os.environ["TF_CUDNN_USE_AUTOTUNE"] = "0"
+    os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+    os.environ["TF_ENABLE_AUTO_MIXED_PRECISION"] = "0"
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def set_tf_determinism(seed: int = SEED) -> None:
+    """Seed/pin TensorFlow. Call once, right after `import tensorflow`."""
+    import tensorflow as tf
+
+    tf.random.set_seed(seed)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+
+
+# ============================================================
+# DSM mode metadata (shared ablation axis across all models)
+# ============================================================
+
+DSM_MODES: List[Dict[str, object]] = [
+    {
+        "key": "dsm_density_uncertainty",
+        "label": "dsm+density+uncertainty",
+        "include_density": True,
+        "include_unc": True,
+    },
+    {
+        "key": "dsm_density",
+        "label": "dsm+density",
+        "include_density": True,
+        "include_unc": False,
+    },
+    {
+        "key": "dsm_uncertainty",
+        "label": "dsm+uncertainty",
+        "include_density": False,
+        "include_unc": True,
+    },
+    {
+        "key": "dsm_only",
+        "label": "dsm only",
+        "include_density": False,
+        "include_unc": False,
+    },
+]
+DSM_MODE_BY_KEY: Dict[str, Dict[str, object]] = {m["key"]: m for m in DSM_MODES}
+
+
+def dsm_mode_channels(dsm_mode: str) -> tuple[bool, bool]:
+    """Return (include_density, include_unc) for a dsm_mode key."""
+    mode = DSM_MODE_BY_KEY[dsm_mode]
+    return bool(mode["include_density"]), bool(mode["include_unc"])
+
+
+# ============================================================
+# Optimizer factory (lazy TF import)
+# ============================================================
+
+
+def make_siamese_dsm_dataset(X, Y, batch_size: int, shuffle: bool, include_density: bool, include_unc: bool, seed: int = SEED):
+    """tf.data pipeline shared by FCSNN and FUJITA: both take a (pre-DSM, post-DSM)
+    input pair selected via the DSM-mode channel flags, with no RGB stream.
+    """
+    import tensorflow as tf
+
+    from models.mmfemsnet import resolve_dsm_channel_indices
+
+    pre_idx, post_idx = resolve_dsm_channel_indices(include_density, include_unc)
+    ds = tf.data.Dataset.from_tensor_slices(((X[..., pre_idx], X[..., post_idx]), Y))
+    if shuffle:
+        ds = ds.shuffle(len(X), seed=seed)
+    ds = ds.batch(batch_size)
+    try:
+        opts = tf.data.Options()
+        opts.experimental_threading.private_threadpool_size = 1
+        opts.experimental_threading.max_intra_op_parallelism = 1
+        ds = ds.with_options(opts)
+    except Exception:
+        pass
+    return ds.prefetch(1)
+
+
+def get_optimizer(name: str, lr: float):
+    from tensorflow.keras import optimizers
+
+    opt_dict = {
+        "Adam": optimizers.Adam(lr),
+        "SGD": optimizers.SGD(lr),
+        "RMSprop": optimizers.RMSprop(lr),
+        "Nadam": optimizers.Nadam(lr),
+        "Adamax": optimizers.Adamax(lr),
+    }
+    if name not in opt_dict:
+        raise ValueError(f"Unknown optimizer: {name}")
+    return opt_dict[name]
+
+
+# ============================================================
+# Metrics / reporting helpers
+# ============================================================
+
+
+def compute_f2(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> float:
+    if num_classes == 1:
+        return float(fbeta_score(y_true, y_pred, beta=2, zero_division=0))
+    return float(fbeta_score(y_true, y_pred, beta=2, average="macro", zero_division=0))
+
+
+def save_classification_report(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    path_txt: str,
+    path_csv: str,
+) -> None:
+    """Save classification report in TXT (pretty) and CSV (tabular) formats."""
+    cr_dict = classification_report(y_true, y_pred, output_dict=True)
+    with open(path_txt, "w") as f:
+        f.write(str(classification_report(y_true, y_pred)))
+    pd.DataFrame(cr_dict).transpose().to_csv(path_csv, index=True)
+
+
+def build_predictions_frame(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_prob: np.ndarray,
+    num_classes: int,
+    source_indices: np.ndarray,
+) -> pd.DataFrame:
+    """Per-sample prediction table: true/pred label, correctness, and
+    per-class probabilities, keyed back to the original dataset row via
+    `source_index`.
+    """
+    df = pd.DataFrame(
+        {
+            "sample_index": np.arange(len(y_true), dtype=np.int64),
+            "source_index": np.asarray(source_indices).astype(np.int64),
+            "y_true": np.asarray(y_true).astype(np.int64),
+            "y_pred": np.asarray(y_pred).astype(np.int64),
+            "is_correct": (np.asarray(y_true) == np.asarray(y_pred)),
+        }
+    )
+    if num_classes == 1:
+        prob_arr = np.asarray(y_prob)
+        if prob_arr.ndim == 1:
+            prob_pos = prob_arr
+            prob_neg = 1.0 - prob_pos
+        elif prob_arr.ndim == 2 and prob_arr.shape[1] == 1:
+            prob_pos = prob_arr[:, 0]
+            prob_neg = 1.0 - prob_pos
+        elif prob_arr.ndim == 2 and prob_arr.shape[1] >= 2:
+            prob_neg = prob_arr[:, 0]
+            prob_pos = prob_arr[:, 1]
+        else:
+            raise ValueError(f"Unsupported binary probability shape: {prob_arr.shape}")
+
+        if len(prob_pos) != len(y_true):
+            raise ValueError(
+                f"Binary probability length mismatch: probs={len(prob_pos)} y_true={len(y_true)}"
+            )
+
+        df["prob_class_0"] = prob_neg
+        df["prob_class_1"] = prob_pos
+        df["pred_confidence"] = np.maximum(prob_neg, prob_pos)
+        df["pred_probability"] = prob_pos
+    else:
+        prob = np.asarray(y_prob)
+        for class_idx in range(prob.shape[1]):
+            df[f"prob_class_{class_idx}"] = prob[:, class_idx]
+        df["pred_probability"] = prob[np.arange(len(y_pred)), y_pred]
+        df["pred_confidence"] = prob.max(axis=1)
+    return df
+
+
+# ============================================================
+# Training callbacks (lazy TF import)
+# ============================================================
+
+
+def make_training_callbacks(
+    results_dir: str,
+    val_data,
+    num_classes: int,
+    *,
+    early_stopping_patience: int = 12,
+    lr_reduce_patience: int = 6,
+    lr_reduce_factor: float = 0.5,
+    lr_reduce_min_lr: float = 1e-6,
+    min_delta: float = 1e-4,
+):
+    """Build the callback list every NN training run uses: a val-F1 tracker
+    driving checkpointing, early stopping, and LR reduction (all monitor
+    `val_f1` rather than val_loss).
+    """
+    import tensorflow as tf
+    from tensorflow.keras import callbacks
+
+    def _collect_dataset_labels(dataset) -> np.ndarray:
+        labels: List[np.ndarray] = []
+        for _, y in dataset:
+            labels.append(y.numpy() if tf.is_tensor(y) else np.asarray(y))
+        return np.concatenate(labels, axis=0)
+
+    class ValidationF1Callback(callbacks.Callback):
+        """Compute validation F1 at the end of each epoch and inject it into logs."""
+
+        def __init__(self):
+            super().__init__()
+            self.y_true = _collect_dataset_labels(val_data)
+            self.best_val_f1 = float("-inf")
+            self.best_epoch = 0
+
+        def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+            if logs is None:
+                logs = {}
+            y_prob = self.model.predict(val_data, verbose=0)
+            if num_classes == 1:
+                y_pred = (np.asarray(y_prob).reshape(-1) >= 0.5).astype(int)
+            else:
+                y_pred = np.argmax(np.asarray(y_prob), axis=-1)
+
+            _, _, _, val_f1, _, _ = compute_metrics(self.y_true, y_pred, num_classes)
+            logs["val_f1"] = val_f1
+            if val_f1 > self.best_val_f1:
+                self.best_val_f1 = val_f1
+                self.best_epoch = epoch + 1
+            print(f" - val_f1: {val_f1:.4f}")
+
+    f1_callback = ValidationF1Callback()
+    best_weights_path = os.path.join(results_dir, "best_weights.weights.h5")
+
+    callback_list = [
+        f1_callback,
+        callbacks.ModelCheckpoint(
+            filepath=best_weights_path,
+            monitor="val_f1",
+            mode="max",
+            save_best_only=True,
+            save_weights_only=True,
+            verbose=1,
+        ),
+        callbacks.EarlyStopping(
+            monitor="val_f1",
+            mode="max",
+            patience=early_stopping_patience,
+            min_delta=min_delta,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        callbacks.ReduceLROnPlateau(
+            monitor="val_f1",
+            mode="max",
+            factor=lr_reduce_factor,
+            patience=lr_reduce_patience,
+            min_delta=min_delta,
+            min_lr=lr_reduce_min_lr,
+            verbose=1,
+        ),
+    ]
+    return callback_list, f1_callback, best_weights_path
+
+
+# ============================================================
+# Resume / skip-if-already-trained + grid-search driver
+# ============================================================
+
+
+def is_already_trained(result_dir: str) -> bool:
+    """A run is considered done once its metrics.csv exists — the result
+    directory path already encodes every grid parameter, so this is a
+    complete resume mechanism without needing a separate checkpoint file.
+    """
+    return os.path.exists(os.path.join(result_dir, "metrics.csv"))
+
+
+def write_run_error(result_dir: str) -> None:
+    os.makedirs(result_dir, exist_ok=True)
+    with open(os.path.join(result_dir, "error.log"), "a") as f:
+        f.write("\nRun failed with exception:\n")
+        f.write(traceback.format_exc())
+
+
+def _combos(grid: Dict[str, Sequence]) -> List[Dict]:
+    if not grid:
+        return [{}]
+    keys = list(grid.keys())
+    return [dict(zip(keys, values)) for values in itertools.product(*grid.values())]
+
+
+def grid_search(
+    ablation_grid: Dict[str, Sequence],
+    hpo_grid: Dict[str, Sequence],
+    result_dir_fn: Callable[..., str],
+    train_one_fn: Callable[..., Dict],
+) -> List[Dict]:
+    """Iterate the cartesian product of `ablation_grid` x `hpo_grid`.
+
+    For each combination of parameters (all ablation + hpo keys merged into
+    one kwargs dict):
+      - build `result_dir = result_dir_fn(**params)`
+      - skip training (but recover its metrics row) if already trained
+      - otherwise call `train_one_fn(result_dir=result_dir, **params)`,
+        which must train, evaluate, save metrics.csv/predictions.csv itself,
+        and return the summary dict
+      - on exception, log to `result_dir/error.log` and continue to the next
+        combination rather than aborting the whole grid search
+
+    Returns the summary dicts for every completed (or already-completed) run.
+    """
+    results: List[Dict] = []
+    for ablation_params in _combos(ablation_grid):
+        for hpo_params in _combos(hpo_grid):
+            params = {**ablation_params, **hpo_params}
+            result_dir = result_dir_fn(**params)
+
+            if is_already_trained(result_dir):
+                print(f"Skipping already-trained run: {result_dir}")
+                try:
+                    df = pd.read_csv(os.path.join(result_dir, "metrics.csv"))
+                    results.extend(df.to_dict(orient="records"))
+                except Exception:
+                    pass
+                continue
+
+            try:
+                summary = train_one_fn(result_dir=result_dir, **params)
+                results.append(summary)
+            except Exception:
+                write_run_error(result_dir)
+                print(f"Run failed; logged to {os.path.join(result_dir, 'error.log')}")
+                continue
+    return results

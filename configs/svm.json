@@ -1,0 +1,18 @@
+{
+  "models": ["Moya", "Hajeb"],
+  "results_root": "results",
+  "seed": 1234,
+  "scenarios": [1, 2, 3],
+  "datasets": {
+    "dataset_16": "Dataset/NPZ/dataset_16.npz"
+  },
+  "ablation_grid": {
+    "dsm_mode": ["dsm_density_uncertainty", "dsm_density", "dsm_uncertainty", "dsm_only"]
+  },
+  "hpo_grid": {
+    "kernel": ["rbf", "linear"],
+    "decision_function": ["ovo", "ovr"],
+    "C": [1, 10],
+    "gamma": ["scale", "auto"]
+  }
+}

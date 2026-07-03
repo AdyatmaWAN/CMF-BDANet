@@ -37,20 +37,32 @@ class snn:
 
         merged = Concatenate()([feat_a, feat_b])
 
-        if(self.n_class == 2):
+        # Binary classification is represented as either num_of_class == 1
+        # (this repo's convention) or == 2 (the original Fujita convention,
+        # i.e. two classes rather than one output unit) - both must produce
+        # a single sigmoid unit, never a softmax over 1 or 2 dense units.
+        if self.n_class in (1, 2):
             actv = "sigmoid"
-            self.n_class = 1
+            units = 1
         else:
             actv = "softmax"
+            units = self.n_class
 
         fc = Dense(128, activation='relu')(merged)
         fc = Dropout(0.5)(fc)  # Added dropout layer
-        outputs = Dense(self.n_class, activation=actv)(fc)
+        outputs = Dense(units, activation=actv)(fc)
         model = Model(inputs=[img_a, img_b], outputs=outputs)
 
         return model
 
+
 if __name__ == "__main__":
-    snn = snn(2, True, True, True, 3, (16, 16, 1), False, False)
-    model = snn.get_model()
-    model.summary()
+    for num_of_class in (1, 2, 5):
+        model = snn(num_of_class, (16, 16, 1)).get_model()
+        units = model.output_shape[-1]
+        actv = model.layers[-1].activation.__name__
+        expected_units, expected_actv = (
+            (1, "sigmoid") if num_of_class in (1, 2) else (num_of_class, "softmax")
+        )
+        assert (units, actv) == (expected_units, expected_actv), (num_of_class, units, actv)
+    print("fujita.snn self-check OK: num_of_class in {1, 2} -> sigmoid(1), else -> softmax(n)")

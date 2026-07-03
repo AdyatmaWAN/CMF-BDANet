@@ -1,5 +1,5 @@
 """
-Siamese Neural Network (SNN) model definition and dataset utilities.
+FCSNN (Siamese Neural Network) model definition and dataset utilities.
 
 Architecture:
 - Shared Siamese tower with 3 conv blocks.
@@ -23,13 +23,13 @@ tf.random.set_seed(SEED)
 
 
 # ============================================================
-# 1. SNN MODEL DEFINITION
+# 1. FCSNN MODEL DEFINITION
 # ============================================================
 
 
-class SNN:
+class FCSNN:
     """
-    Siamese Neural Network for building damage change detection
+    FCSNN (Siamese Neural Network) for building damage change detection
     using pre- and post-DSM tensors.
 
     Args:
@@ -78,7 +78,7 @@ class SNN:
             (Conv → BN → ReLU) × num_of_layer → MaxPool(2x2) → optional Dropout
         Optionally collects intermediate flattened tensors for residual concat.
         """
-        inputs = layers.Input(self.input_shape, name="snn_input")
+        inputs = layers.Input(self.input_shape, name="fcsnn_input")
         x = inputs
         feats = []
         convs = [32, 64, 128]
@@ -121,15 +121,15 @@ class SNN:
                 x = layers.Dropout(0.5, seed=SEED)(x)
 
         if self.is_residual:
-            output = layers.Concatenate(name="snn_concat_feats")(feats + [x])
+            output = layers.Concatenate(name="fcsnn_concat_feats")(feats + [x])
         else:
             output = x
 
-        return Model(inputs, output, name="snn_tower")
+        return Model(inputs, output, name="fcsnn_tower")
 
     def get_model(self) -> Model:
         """
-        Build the full SNN model with two inputs (preDSM, postDSM) and a head.
+        Build the full FCSNN model with two inputs (preDSM, postDSM) and a head.
 
         Behavior:
             - If n_class == 1 → Dense(1, sigmoid)  (binary)
@@ -147,10 +147,10 @@ class SNN:
             feat_b = self.__build_siamese_model()(img_b)
 
         if self.substraction:
-            distance = layers.Subtract(name="snn_subtract")([feat_a, feat_b])
+            distance = layers.Subtract(name="fcsnn_subtract")([feat_a, feat_b])
             distance = tf.abs(distance)
         else:
-            distance = layers.Concatenate(name="snn_concat")([feat_a, feat_b])
+            distance = layers.Concatenate(name="fcsnn_concat")([feat_a, feat_b])
 
         # Optional MCMAF-style attention fusion over the two embedding vectors
         # (treats feat_a and feat_b as tokens and computes softmax gates).
@@ -180,7 +180,7 @@ class SNN:
             name="output",
         )(distance)
 
-        model = Model(inputs=[img_a, img_b], outputs=out, name="SNN")
+        model = Model(inputs=[img_a, img_b], outputs=out, name="FCSNN")
         return model
 
 
