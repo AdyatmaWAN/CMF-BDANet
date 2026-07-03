@@ -22,10 +22,7 @@ import argparse
 import functools
 import json
 import os
-import time
 from typing import Dict, Tuple
-
-import numpy as np
 
 from utils.experiment import set_global_determinism
 
@@ -35,14 +32,10 @@ import pandas as pd  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
-    build_predictions_frame,
-    compute_f2,
     dsm_mode_channels,
-    get_optimizer,
     grid_search,
-    make_training_callbacks,
-    save_classification_report,
     set_tf_determinism,
+    train_and_evaluate_nn,
 )
 from models.fcsnn import load_dataset  # noqa: E402
 from models.mmfemsnet import (  # noqa: E402
@@ -51,7 +44,6 @@ from models.mmfemsnet import (  # noqa: E402
     resolve_dsm_channel_indices,
 )
 from utils.label_processing import prepare_split_with_indices  # noqa: E402
-from utils.metrics import compute_metrics  # noqa: E402
 
 set_tf_determinism()
 
@@ -114,7 +106,6 @@ def train_one(
     callback_cfg: Dict,
     X_train, Y_train, X_val, Y_val, X_test, Y_test, test_indices,
 ) -> Dict:
-    os.makedirs(result_dir, exist_ok=True)
     include_density, include_unc = dsm_mode_channels(dsm_mode)
     four_stream, concat_post_dsm = decode_variant(variant)
 
@@ -142,75 +133,31 @@ def train_one(
         fusion=fusion,
     )
 
-    loss = "binary_crossentropy" if num_classes == 1 else "sparse_categorical_crossentropy"
-    model.compile(optimizer=get_optimizer(optimizer, learning_rate), loss=loss, metrics=["accuracy"])
-
-    training_callbacks, f1_callback, best_weights_path = make_training_callbacks(
-        results_dir=result_dir, val_data=val_ds, num_classes=num_classes, **callback_cfg
+    return train_and_evaluate_nn(
+        result_dir=result_dir,
+        model=model,
+        model_label="MMF",
+        num_classes=num_classes,
+        optimizer_name=optimizer,
+        learning_rate=learning_rate,
+        train_ds=train_ds,
+        val_ds=val_ds,
+        test_ds=test_ds,
+        test_indices=test_indices,
+        epochs=epochs,
+        callback_cfg=callback_cfg,
+        extra_summary={
+            "scenario": scenario,
+            "dataset": dataset_name,
+            "dsm_mode_tag": dsm_mode,
+            "variant_tag": variant,
+            "dsm_post_concat_with_rgb": concat_post_dsm,
+            "use_four_stream": four_stream,
+            "residual": residual,
+            "fusion": fusion,
+            "batch_size": batch_size,
+        },
     )
-
-    t0 = time.time()
-    model.fit(train_ds, validation_data=val_ds, epochs=epochs, verbose=1, callbacks=training_callbacks)
-    if os.path.exists(best_weights_path):
-        model.load_weights(best_weights_path)
-    train_time = time.time() - t0
-
-    y_prob = model.predict(test_ds)
-    y_pred = (y_prob > 0.5).astype(int).reshape(-1) if num_classes == 1 else np.argmax(y_prob, axis=-1)
-    y_true = np.concatenate([y for (_, y) in test_ds], axis=0)
-
-    acc, prec, rec, f1, mcc, cm = compute_metrics(y_true, y_pred, num_classes)
-    macro_f2 = compute_f2(y_true, y_pred, num_classes)
-
-    pred_df = build_predictions_frame(y_true, y_pred, y_prob, num_classes, test_indices)
-    pred_df.to_csv(os.path.join(result_dir, "predictions.csv"), index=False)
-    save_classification_report(
-        y_true, y_pred,
-        os.path.join(result_dir, "classification_report.txt"),
-        os.path.join(result_dir, "classification_report.csv"),
-    )
-
-    model.save(os.path.join(result_dir, "model.keras"))
-    model.save_weights(os.path.join(result_dir, "weights.h5"))
-
-    summary = {
-        "scenario": scenario,
-        "dataset": dataset_name,
-        "model": "MMF",
-        "dsm_mode_tag": dsm_mode,
-        "variant_tag": variant,
-        "dsm_post_concat_with_rgb": concat_post_dsm,
-        "use_four_stream": four_stream,
-        "residual": residual,
-        "fusion": fusion,
-        "optimizer": optimizer,
-        "learning_rate": learning_rate,
-        "batch_size": batch_size,
-        "epochs": epochs,
-        "num_classes": num_classes,
-        "accuracy": acc,
-        "precision": prec,
-        "recall": rec,
-        "macro_f1": f1,
-        "macro_f2": macro_f2,
-        "mcc": mcc,
-        "cm00": int(cm[0, 0]) if cm.shape == (2, 2) else 0,
-        "cm01": int(cm[0, 1]) if cm.shape == (2, 2) else 0,
-        "cm10": int(cm[1, 0]) if cm.shape == (2, 2) else 0,
-        "cm11": int(cm[1, 1]) if cm.shape == (2, 2) else 0,
-        "confusion_matrix_json": json.dumps(cm.tolist()),
-        "best_val_f1": f1_callback.best_val_f1,
-        "best_val_epoch": f1_callback.best_epoch,
-        "monitor_metric": "val_f1",
-        "train_time_sec": train_time,
-        "num_test_samples": int(len(y_true)),
-        "predictions_csv": os.path.join(result_dir, "predictions.csv"),
-        "result_dir": result_dir,
-    }
-    pd.DataFrame([summary]).to_csv(os.path.join(result_dir, "metrics.csv"), index=False)
-
-    print(f"[MMF] scenario={scenario} ACC={acc:.4f} F1={f1:.4f} MCC={mcc:.4f}")
-    return summary
 
 
 def parse_args() -> argparse.Namespace:

@@ -12,8 +12,10 @@ importing this module is always safe to do first.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import random
+import time
 import traceback
 from typing import Callable, Dict, List, Sequence
 
@@ -298,6 +300,103 @@ def make_training_callbacks(
         ),
     ]
     return callback_list, f1_callback, best_weights_path
+
+
+# ============================================================
+# Shared NN compile -> train -> evaluate -> save loop
+# ============================================================
+
+
+def train_and_evaluate_nn(
+    *,
+    result_dir: str,
+    model,
+    model_label: str,
+    num_classes: int,
+    optimizer_name: str,
+    learning_rate: float,
+    train_ds,
+    val_ds,
+    test_ds,
+    test_indices,
+    epochs: int,
+    callback_cfg: Dict,
+    extra_summary: Dict,
+) -> Dict:
+    """Compile, train, evaluate, and save everything for one already-built
+    (uncompiled) Keras model. This is the block every NN `train_*.py` script
+    (FCSNN, MMF-EMSNet, FUJITA) needs identically; only how the model and
+    datasets are built differs between them, which stays in each script.
+
+    `extra_summary` supplies whatever identity/ablation columns the caller
+    wants in metrics.csv (scenario, dataset, dsm_mode_tag, batch_size, and
+    any model-specific ablation fields like residual/fusion/variant_tag) —
+    this function only knows about what it directly computes.
+    """
+    os.makedirs(result_dir, exist_ok=True)
+
+    loss = "binary_crossentropy" if num_classes == 1 else "sparse_categorical_crossentropy"
+    model.compile(optimizer=get_optimizer(optimizer_name, learning_rate), loss=loss, metrics=["accuracy"])
+
+    training_callbacks, f1_callback, best_weights_path = make_training_callbacks(
+        results_dir=result_dir, val_data=val_ds, num_classes=num_classes, **callback_cfg
+    )
+
+    t0 = time.time()
+    model.fit(train_ds, validation_data=val_ds, epochs=epochs, verbose=1, callbacks=training_callbacks)
+    if os.path.exists(best_weights_path):
+        model.load_weights(best_weights_path)
+    train_time = time.time() - t0
+
+    y_prob = model.predict(test_ds)
+    y_pred = (y_prob > 0.5).astype(int).reshape(-1) if num_classes == 1 else np.argmax(y_prob, axis=-1)
+    y_true = np.concatenate([y for (_, y) in test_ds], axis=0)
+
+    acc, prec, rec, f1, mcc, cm = compute_metrics(y_true, y_pred, num_classes)
+    macro_f2 = compute_f2(y_true, y_pred, num_classes)
+
+    pred_df = build_predictions_frame(y_true, y_pred, y_prob, num_classes, test_indices)
+    predictions_csv = os.path.join(result_dir, "predictions.csv")
+    pred_df.to_csv(predictions_csv, index=False)
+    save_classification_report(
+        y_true, y_pred,
+        os.path.join(result_dir, "classification_report.txt"),
+        os.path.join(result_dir, "classification_report.csv"),
+    )
+
+    model.save(os.path.join(result_dir, "model.keras"))
+    model.save_weights(os.path.join(result_dir, "weights.h5"))
+
+    summary = {
+        **extra_summary,
+        "model": model_label,
+        "optimizer": optimizer_name,
+        "learning_rate": learning_rate,
+        "epochs": epochs,
+        "num_classes": num_classes,
+        "accuracy": acc,
+        "precision": prec,
+        "recall": rec,
+        "macro_f1": f1,
+        "macro_f2": macro_f2,
+        "mcc": mcc,
+        "cm00": int(cm[0, 0]) if cm.shape == (2, 2) else 0,
+        "cm01": int(cm[0, 1]) if cm.shape == (2, 2) else 0,
+        "cm10": int(cm[1, 0]) if cm.shape == (2, 2) else 0,
+        "cm11": int(cm[1, 1]) if cm.shape == (2, 2) else 0,
+        "confusion_matrix_json": json.dumps(cm.tolist()),
+        "best_val_f1": f1_callback.best_val_f1,
+        "best_val_epoch": f1_callback.best_epoch,
+        "monitor_metric": "val_f1",
+        "train_time_sec": train_time,
+        "num_test_samples": int(len(y_true)),
+        "predictions_csv": predictions_csv,
+        "result_dir": result_dir,
+    }
+    pd.DataFrame([summary]).to_csv(os.path.join(result_dir, "metrics.csv"), index=False)
+
+    print(f"[{model_label}] ACC={acc:.4f} F1={f1:.4f} MCC={mcc:.4f}")
+    return summary
 
 
 # ============================================================
