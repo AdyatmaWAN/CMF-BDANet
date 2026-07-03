@@ -142,6 +142,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="configs/fcsnn.json")
     parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
+    parser.add_argument("--residual", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--fusion", type=str, default=None, choices=["concat", "mcmaf"])
     return parser.parse_args()
 
 
@@ -158,6 +160,10 @@ def main() -> None:
     ablation_grid = dict(config["ablation_grid"])
     if args.dsm_mode is not None:
         ablation_grid["dsm_mode"] = [args.dsm_mode]
+    if args.residual is not None:
+        ablation_grid["residual"] = [args.residual == "true"]
+    if args.fusion is not None:
+        ablation_grid["fusion"] = [args.fusion]
 
     all_results = []
     for scenario in scenarios:
