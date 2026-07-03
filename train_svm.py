@@ -196,7 +196,7 @@ def train_one(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/svm.json")
-    parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3])
+    parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
     parser.add_argument("--model", type=str, default=None, choices=["Moya", "Hajeb"])
     return parser.parse_args()

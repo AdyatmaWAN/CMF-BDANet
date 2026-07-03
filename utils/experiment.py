@@ -229,13 +229,28 @@ def make_training_callbacks(
     lr_reduce_factor: float = 0.5,
     lr_reduce_min_lr: float = 1e-6,
     min_delta: float = 1e-4,
+    decode_pred_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    decode_true_fn: Callable[[np.ndarray], np.ndarray] | None = None,
 ):
     """Build the callback list every NN training run uses: a val-F1 tracker
     driving checkpointing, early stopping, and LR reduction (all monitor
     `val_f1` rather than val_loss).
+
+    `decode_pred_fn`/`decode_true_fn` let a caller override how raw model
+    output / raw dataset labels get turned into integer class labels before
+    computing val_f1 — needed for CORAL ordinal training, where both the
+    model's output and the dataset's `Y` are not plain integer labels.
+    Defaults reproduce the original threshold/argmax behavior.
     """
     import tensorflow as tf
     from tensorflow.keras import callbacks
+
+    decode_pred = decode_pred_fn or (
+        lambda p: (np.asarray(p).reshape(-1) >= 0.5).astype(int)
+        if num_classes == 1
+        else np.argmax(np.asarray(p), axis=-1)
+    )
+    decode_true = decode_true_fn or (lambda y: np.asarray(y))
 
     def _collect_dataset_labels(dataset) -> np.ndarray:
         labels: List[np.ndarray] = []
@@ -248,7 +263,7 @@ def make_training_callbacks(
 
         def __init__(self):
             super().__init__()
-            self.y_true = _collect_dataset_labels(val_data)
+            self.y_true = decode_true(_collect_dataset_labels(val_data))
             self.best_val_f1 = float("-inf")
             self.best_epoch = 0
 
@@ -256,10 +271,7 @@ def make_training_callbacks(
             if logs is None:
                 logs = {}
             y_prob = self.model.predict(val_data, verbose=0)
-            if num_classes == 1:
-                y_pred = (np.asarray(y_prob).reshape(-1) >= 0.5).astype(int)
-            else:
-                y_pred = np.argmax(np.asarray(y_prob), axis=-1)
+            y_pred = decode_pred(y_prob)
 
             _, _, _, val_f1, _, _ = compute_metrics(self.y_true, y_pred, num_classes)
             logs["val_f1"] = val_f1
@@ -322,6 +334,11 @@ def train_and_evaluate_nn(
     epochs: int,
     callback_cfg: Dict,
     extra_summary: Dict,
+    loss: str | None = None,
+    decode_pred_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    decode_true_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    class_probs_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    extra_metrics_fn: Callable[[np.ndarray, np.ndarray], Dict] | None = None,
 ) -> Dict:
     """Compile, train, evaluate, and save everything for one already-built
     (uncompiled) Keras model. This is the block every NN `train_*.py` script
@@ -332,14 +349,38 @@ def train_and_evaluate_nn(
     wants in metrics.csv (scenario, dataset, dsm_mode_tag, batch_size, and
     any model-specific ablation fields like residual/fusion/variant_tag) —
     this function only knows about what it directly computes.
+
+    The five optional hooks below all default to None, reproducing the
+    original nominal-classification behavior exactly. They exist for CORAL
+    ordinal training (see train_mmfemsnet.py), where the loss, the
+    model-output -> label decoding, and the model-output -> per-class
+    probability conversion are all different from plain softmax/sigmoid:
+        loss             - override the auto-selected loss.
+        decode_pred_fn   - model output probs -> integer y_pred.
+        decode_true_fn   - raw dataset Y -> integer y_true.
+        class_probs_fn   - model output probs -> per-class probability
+                           matrix for predictions.csv (identity by default).
+        extra_metrics_fn - (y_true_int, y_pred_int) -> extra summary fields,
+                           e.g. {"mae": ..., "qwk": ...}.
     """
     os.makedirs(result_dir, exist_ok=True)
 
-    loss = "binary_crossentropy" if num_classes == 1 else "sparse_categorical_crossentropy"
+    if loss is None:
+        loss = "binary_crossentropy" if num_classes == 1 else "sparse_categorical_crossentropy"
     model.compile(optimizer=get_optimizer(optimizer_name, learning_rate), loss=loss, metrics=["accuracy"])
 
+    decode_pred = decode_pred_fn or (
+        lambda p: (np.asarray(p).reshape(-1) > 0.5).astype(int)
+        if num_classes == 1
+        else np.argmax(np.asarray(p), axis=-1)
+    )
+    decode_true = decode_true_fn or (lambda y: np.asarray(y))
+    to_class_probs = class_probs_fn or (lambda p: p)
+
     training_callbacks, f1_callback, best_weights_path = make_training_callbacks(
-        results_dir=result_dir, val_data=val_ds, num_classes=num_classes, **callback_cfg
+        results_dir=result_dir, val_data=val_ds, num_classes=num_classes,
+        decode_pred_fn=decode_pred_fn, decode_true_fn=decode_true_fn,
+        **callback_cfg,
     )
 
     t0 = time.time()
@@ -349,13 +390,13 @@ def train_and_evaluate_nn(
     train_time = time.time() - t0
 
     y_prob = model.predict(test_ds)
-    y_pred = (y_prob > 0.5).astype(int).reshape(-1) if num_classes == 1 else np.argmax(y_prob, axis=-1)
-    y_true = np.concatenate([y for (_, y) in test_ds], axis=0)
+    y_pred = decode_pred(y_prob)
+    y_true = decode_true(np.concatenate([y for (_, y) in test_ds], axis=0))
 
     acc, prec, rec, f1, mcc, cm = compute_metrics(y_true, y_pred, num_classes)
     macro_f2 = compute_f2(y_true, y_pred, num_classes)
 
-    pred_df = build_predictions_frame(y_true, y_pred, y_prob, num_classes, test_indices)
+    pred_df = build_predictions_frame(y_true, y_pred, to_class_probs(y_prob), num_classes, test_indices)
     predictions_csv = os.path.join(result_dir, "predictions.csv")
     pred_df.to_csv(predictions_csv, index=False)
     save_classification_report(
@@ -380,6 +421,7 @@ def train_and_evaluate_nn(
         "macro_f1": f1,
         "macro_f2": macro_f2,
         "mcc": mcc,
+        **(extra_metrics_fn(y_true, y_pred) if extra_metrics_fn else {}),
         "cm00": int(cm[0, 0]) if cm.shape == (2, 2) else 0,
         "cm01": int(cm[0, 1]) if cm.shape == (2, 2) else 0,
         "cm10": int(cm[1, 0]) if cm.shape == (2, 2) else 0,

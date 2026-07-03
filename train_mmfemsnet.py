@@ -11,9 +11,15 @@ The "variant" ablation axis encodes the 3-stream-with-concat /
 (rather than two independent booleans) so the grid doesn't produce the
 redundant 4-stream/no-concat duplicate of 4-stream/concat.
 
+Scenario 5 is the ordinal-regression version of scenario 3's data (same 5
+classes, no row filtering) - see utils/label_processing.py::is_ordinal_scenario
+and models/mmfemsnet.py's CoralBiases head for the mechanics, and the
+README's "Ordinal regression (scenario 5)" section for the full explanation.
+
 Usage:
     python train_mmfemsnet.py
     python train_mmfemsnet.py --config configs/mmfemsnet.json --scenario 1
+    python train_mmfemsnet.py --scenario 5   # ordinal regression (CORAL)
 """
 
 from __future__ import annotations
@@ -23,6 +29,8 @@ import functools
 import json
 import os
 from typing import Dict, Tuple
+
+import numpy as np
 
 from utils.experiment import set_global_determinism
 
@@ -40,10 +48,13 @@ from utils.experiment import (  # noqa: E402
 from models.fcsnn import load_dataset  # noqa: E402
 from models.mmfemsnet import (  # noqa: E402
     build_mmf_emsnet_conv,
+    coral_probs_to_class_probs,
+    decode_coral_predictions,
     make_dataset as make_mmf_dataset,
     resolve_dsm_channel_indices,
 )
-from utils.label_processing import prepare_split_with_indices  # noqa: E402
+from utils.label_processing import is_ordinal_scenario, prepare_split_with_indices  # noqa: E402
+from utils.metrics import compute_ordinal_metrics  # noqa: E402
 
 set_tf_determinism()
 
@@ -59,6 +70,19 @@ def decode_variant(variant: str) -> Tuple[bool, bool]:
     if variant == "3stream_no_concat":
         return False, False
     raise ValueError(f"Unknown MMF variant: {variant}")
+
+
+def _decode_coral_true(y_encoded: np.ndarray) -> np.ndarray:
+    """True CORAL-encoded labels are exact (no thresholding uncertainty):
+    exactly `rank` of the `num_classes - 1` entries are 1, so summing
+    recovers the original integer rank directly.
+    """
+    return np.sum(np.asarray(y_encoded), axis=-1).astype(np.int64)
+
+
+def _ordinal_extra_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
+    mae, qwk = compute_ordinal_metrics(y_true, y_pred)
+    return {"mae": mae, "qwk": qwk}
 
 
 def build_result_dir(
@@ -108,15 +132,26 @@ def train_one(
 ) -> Dict:
     include_density, include_unc = dsm_mode_channels(dsm_mode)
     four_stream, concat_post_dsm = decode_variant(variant)
+    ordinal = is_ordinal_scenario(scenario)
 
     print(
         f"\n===== [MMF] scenario={scenario} dataset={dataset_name} dsm={dsm_mode} variant={variant} "
-        f"residual={residual} fusion={fusion} opt={optimizer} lr={learning_rate} bs={batch_size} ====="
+        f"residual={residual} fusion={fusion} opt={optimizer} lr={learning_rate} bs={batch_size} "
+        f"ordinal={ordinal} ====="
     )
 
-    train_ds = make_mmf_dataset(X_train, Y_train, batch_size, True, include_density, include_unc, four_stream)
-    val_ds = make_mmf_dataset(X_val, Y_val, batch_size, False, include_density, include_unc, four_stream)
-    test_ds = make_mmf_dataset(X_test, Y_test, batch_size, False, include_density, include_unc, four_stream)
+    train_ds = make_mmf_dataset(
+        X_train, Y_train, batch_size, True, include_density, include_unc, four_stream,
+        ordinal=ordinal, num_classes=num_classes,
+    )
+    val_ds = make_mmf_dataset(
+        X_val, Y_val, batch_size, False, include_density, include_unc, four_stream,
+        ordinal=ordinal, num_classes=num_classes,
+    )
+    test_ds = make_mmf_dataset(
+        X_test, Y_test, batch_size, False, include_density, include_unc, four_stream,
+        ordinal=ordinal, num_classes=num_classes,
+    )
 
     H, W = X_train.shape[1], X_train.shape[2]
     dsm_channels = len(resolve_dsm_channel_indices(include_density, include_unc)[0])
@@ -131,6 +166,7 @@ def train_one(
         four_stream=four_stream,
         residual=residual,
         fusion=fusion,
+        ordinal=ordinal,
     )
 
     return train_and_evaluate_nn(
@@ -146,7 +182,13 @@ def train_one(
         test_indices=test_indices,
         epochs=epochs,
         callback_cfg=callback_cfg,
+        loss="binary_crossentropy" if ordinal else None,
+        decode_pred_fn=decode_coral_predictions if ordinal else None,
+        decode_true_fn=_decode_coral_true if ordinal else None,
+        class_probs_fn=coral_probs_to_class_probs if ordinal else None,
+        extra_metrics_fn=_ordinal_extra_metrics if ordinal else None,
         extra_summary={
+            "ordinal": ordinal,
             "scenario": scenario,
             "dataset": dataset_name,
             "dsm_mode_tag": dsm_mode,
@@ -163,7 +205,7 @@ def train_one(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/mmfemsnet.json")
-    parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3])
+    parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
     parser.add_argument("--variant", type=str, default=None, choices=VARIANTS)
     return parser.parse_args()

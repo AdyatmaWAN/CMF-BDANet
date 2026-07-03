@@ -17,6 +17,19 @@ Scenario 3:
     Multiclass classification with all 5 classes.
     Classes:
         0, 1, 2, 3, 4  (identity mapping)
+
+Scenario 4:
+    Binary classification: first two classes vs last three.
+    Group:
+        {0, 1}       → 0
+        {2, 3, 4}    → 1
+
+Scenario 5:
+    Ordinal regression over the same 5 classes as scenario 3 (identity
+    mapping, no row filtering) — the data prep is identical to scenario 3.
+    What differs is purely how a model is trained on it (see
+    `is_ordinal_scenario` and models/mmfemsnet.py's CORAL head), not the
+    label mapping.
 """
 
 from __future__ import annotations
@@ -24,6 +37,14 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 import numpy as np
+
+
+def is_ordinal_scenario(scenario: int) -> bool:
+    """True if `scenario` should be trained as ordinal regression rather
+    than nominal classification, even though its label data is identical
+    to a nominal scenario (5 reuses scenario 3's data).
+    """
+    return scenario == 5
 
 
 def _prepare_split(
@@ -55,16 +76,26 @@ def _prepare_split(
         Y_proc = np.array([mapping[int(y)] for y in Y], dtype=np.int64)
         num_classes = 1
 
-    elif scenario == 3:
-        # All 5 classes intact
+    elif scenario in (3, 5):
+        # All 5 classes intact. Scenario 5 reuses this exact data prep -
+        # ordinality is a training-time concern (see is_ordinal_scenario),
+        # not a different label mapping.
         indices = np.arange(len(Y), dtype=np.int64)
         mapping = {int(c): int(c) for c in np.unique(Y)}
         X_proc = X
         Y_proc = Y.astype(np.int64)
         num_classes = len(mapping)  # should be 5
 
+    elif scenario == 4:
+        # Group 0-1 vs 2-3-4
+        indices = np.arange(len(Y), dtype=np.int64)
+        mapping = {0: 0, 1: 0, 2: 1, 3: 1, 4: 1}
+        X_proc = X
+        Y_proc = np.array([mapping[int(y)] for y in Y], dtype=np.int64)
+        num_classes = 1
+
     else:
-        raise ValueError("Scenario must be 1, 2, or 3.")
+        raise ValueError("Scenario must be 1, 2, 3, 4, or 5.")
 
     return X_proc, Y_proc, indices, num_classes, mapping
 
@@ -84,11 +115,14 @@ def prepare_split_for_scenario(
             1 → binary (0 vs 4), filter to only these classes.
             2 → binary (0–3 vs 4).
             3 → multiclass (0–4).
+            4 → binary (0–1 vs 2–4).
+            5 → multiclass (0–4), trained as ordinal regression (same data
+                as scenario 3; see is_ordinal_scenario).
 
     Returns:
         X_proc: Possibly filtered data.
         Y_proc: Reindexed labels.
-        num_classes: 1 for binary, or 5 for multiclass.
+        num_classes: 1 for binary, or 5 for multiclass/ordinal.
         mapping: dict {old_label → new_label}.
     """
     X_proc, Y_proc, _indices, num_classes, mapping = _prepare_split(X, Y, scenario)

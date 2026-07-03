@@ -2,7 +2,7 @@
   "models": ["Moya", "Hajeb"],
   "results_root": "results",
   "seed": 1234,
-  "scenarios": [1, 2, 3],
+  "scenarios": [1, 2, 3, 4],
   "datasets": {
     "dataset_16": "Dataset/NPZ/dataset_16.npz"
   },
