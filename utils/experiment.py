@@ -245,16 +245,24 @@ def make_training_callbacks(
     min_delta: float = 1e-4,
     decode_pred_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     decode_true_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    monitor_name: str = "val_f1",
+    monitor_fn: Callable[[np.ndarray, np.ndarray], float] | None = None,
 ):
-    """Build the callback list every NN training run uses: a val-F1 tracker
-    driving checkpointing, early stopping, and LR reduction (all monitor
-    `val_f1` rather than val_loss).
+    """Build the callback list every NN training run uses: a validation
+    metric tracker driving checkpointing, early stopping, and LR reduction
+    (all monitor `monitor_name`, mode="max", rather than val_loss).
 
     `decode_pred_fn`/`decode_true_fn` let a caller override how raw model
     output / raw dataset labels get turned into integer class labels before
-    computing val_f1 — needed for CORAL ordinal training, where both the
-    model's output and the dataset's `Y` are not plain integer labels.
-    Defaults reproduce the original threshold/argmax behavior.
+    scoring — needed for CORAL ordinal training, where both the model's
+    output and the dataset's `Y` are not plain integer labels. Defaults
+    reproduce the original threshold/argmax behavior.
+
+    `monitor_name`/`monitor_fn` let a caller change *which* metric is
+    tracked (default: macro-F1, matching the historical "val_f1" behavior).
+    CORAL ordinal training monitors quadratic-weighted-kappa instead — see
+    models/ordinal.py::ordinal_monitor_metric — since macro-F1 on decoded
+    ranks doesn't reflect how far off a wrong ordinal prediction is.
     """
     import tensorflow as tf
     from tensorflow.keras import callbacks
@@ -265,6 +273,7 @@ def make_training_callbacks(
         else np.argmax(np.asarray(p), axis=-1)
     )
     decode_true = decode_true_fn or (lambda y: np.asarray(y))
+    score_fn = monitor_fn or (lambda yt, yp: compute_metrics(yt, yp, num_classes)[3])  # macro_f1
 
     def _collect_dataset_labels(dataset) -> np.ndarray:
         labels: List[np.ndarray] = []
@@ -272,13 +281,14 @@ def make_training_callbacks(
             labels.append(y.numpy() if tf.is_tensor(y) else np.asarray(y))
         return np.concatenate(labels, axis=0)
 
-    class ValidationF1Callback(callbacks.Callback):
-        """Compute validation F1 at the end of each epoch and inject it into logs."""
+    class ValidationMetricCallback(callbacks.Callback):
+        """Compute the monitored metric at the end of each epoch and inject
+        it into logs under `monitor_name`."""
 
         def __init__(self):
             super().__init__()
             self.y_true = decode_true(_collect_dataset_labels(val_data))
-            self.best_val_f1 = float("-inf")
+            self.best_value = float("-inf")
             self.best_epoch = 0
 
         def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
@@ -287,28 +297,28 @@ def make_training_callbacks(
             y_prob = self.model.predict(val_data, verbose=0)
             y_pred = decode_pred(y_prob)
 
-            _, _, _, val_f1, _, _ = compute_metrics(self.y_true, y_pred, num_classes)
-            logs["val_f1"] = val_f1
-            if val_f1 > self.best_val_f1:
-                self.best_val_f1 = val_f1
+            value = score_fn(self.y_true, y_pred)
+            logs[monitor_name] = value
+            if value > self.best_value:
+                self.best_value = value
                 self.best_epoch = epoch + 1
-            print(f" - val_f1: {val_f1:.4f}")
+            print(f" - {monitor_name}: {value:.4f}")
 
-    f1_callback = ValidationF1Callback()
+    metric_callback = ValidationMetricCallback()
     best_weights_path = os.path.join(results_dir, "best_weights.weights.h5")
 
     callback_list = [
-        f1_callback,
+        metric_callback,
         callbacks.ModelCheckpoint(
             filepath=best_weights_path,
-            monitor="val_f1",
+            monitor=monitor_name,
             mode="max",
             save_best_only=True,
             save_weights_only=True,
             verbose=1,
         ),
         callbacks.EarlyStopping(
-            monitor="val_f1",
+            monitor=monitor_name,
             mode="max",
             patience=early_stopping_patience,
             min_delta=min_delta,
@@ -316,7 +326,7 @@ def make_training_callbacks(
             verbose=1,
         ),
         callbacks.ReduceLROnPlateau(
-            monitor="val_f1",
+            monitor=monitor_name,
             mode="max",
             factor=lr_reduce_factor,
             patience=lr_reduce_patience,
@@ -325,7 +335,7 @@ def make_training_callbacks(
             verbose=1,
         ),
     ]
-    return callback_list, f1_callback, best_weights_path
+    return callback_list, metric_callback, best_weights_path
 
 
 # ============================================================
@@ -353,6 +363,9 @@ def train_and_evaluate_nn(
     decode_true_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     class_probs_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     extra_metrics_fn: Callable[[np.ndarray, np.ndarray], Dict] | None = None,
+    monitor_name: str = "val_f1",
+    monitor_fn: Callable[[np.ndarray, np.ndarray], float] | None = None,
+    summary_log_fn: Callable[[Dict], str] | None = None,
 ) -> Dict:
     """Compile, train, evaluate, and save everything for one already-built
     (uncompiled) Keras model. This is the block every NN `train_*.py` script
@@ -364,18 +377,26 @@ def train_and_evaluate_nn(
     any model-specific ablation fields like residual/fusion/variant_tag) —
     this function only knows about what it directly computes.
 
-    The five optional hooks below all default to None, reproducing the
-    original nominal-classification behavior exactly. They exist for CORAL
-    ordinal training (see train_mmfemsnet.py), where the loss, the
-    model-output -> label decoding, and the model-output -> per-class
-    probability conversion are all different from plain softmax/sigmoid:
+    The optional hooks below all default to None, reproducing the original
+    nominal-classification behavior exactly. They exist for CORAL ordinal
+    training (see train_mmfemsnet.py / models/ordinal.py), where the loss,
+    the model-output -> label decoding, the model-output -> per-class
+    probability conversion, and the metric driving checkpointing/early
+    stopping/console output are all different from plain softmax/sigmoid:
         loss             - override the auto-selected loss.
         decode_pred_fn   - model output probs -> integer y_pred.
         decode_true_fn   - raw dataset Y -> integer y_true.
         class_probs_fn   - model output probs -> per-class probability
                            matrix for predictions.csv (identity by default).
         extra_metrics_fn - (y_true_int, y_pred_int) -> extra summary fields,
-                           e.g. {"mae": ..., "qwk": ...}.
+                           e.g. ordinal's {"mae": ..., "qwk": ..., ...}.
+        monitor_name     - log key + callback `monitor=` value (default
+                           "val_f1"); paired with monitor_fn.
+        monitor_fn       - (y_true_int, y_pred_int) -> float score used for
+                           checkpointing/early-stopping/LR-reduction inside
+                           make_training_callbacks (default: macro-F1).
+        summary_log_fn   - (summary_dict) -> str, the final console line
+                           (default: "ACC=.. F1=.. MCC=..").
     """
     os.makedirs(result_dir, exist_ok=True)
 
@@ -391,9 +412,10 @@ def train_and_evaluate_nn(
     decode_true = decode_true_fn or (lambda y: np.asarray(y))
     to_class_probs = class_probs_fn or (lambda p: p)
 
-    training_callbacks, f1_callback, best_weights_path = make_training_callbacks(
+    training_callbacks, metric_callback, best_weights_path = make_training_callbacks(
         results_dir=result_dir, val_data=val_ds, num_classes=num_classes,
         decode_pred_fn=decode_pred_fn, decode_true_fn=decode_true_fn,
+        monitor_name=monitor_name, monitor_fn=monitor_fn,
         **callback_cfg,
     )
 
@@ -441,9 +463,9 @@ def train_and_evaluate_nn(
         "cm10": int(cm[1, 0]) if cm.shape == (2, 2) else 0,
         "cm11": int(cm[1, 1]) if cm.shape == (2, 2) else 0,
         "confusion_matrix_json": json.dumps(cm.tolist()),
-        "best_val_f1": f1_callback.best_val_f1,
-        "best_val_epoch": f1_callback.best_epoch,
-        "monitor_metric": "val_f1",
+        "best_val_metric": metric_callback.best_value,
+        "best_val_epoch": metric_callback.best_epoch,
+        "monitor_metric": monitor_name,
         "train_time_sec": train_time,
         "num_test_samples": int(len(y_true)),
         "predictions_csv": predictions_csv,
@@ -451,7 +473,8 @@ def train_and_evaluate_nn(
     }
     pd.DataFrame([summary]).to_csv(os.path.join(result_dir, "metrics.csv"), index=False)
 
-    print(f"[{model_label}] ACC={acc:.4f} F1={f1:.4f} MCC={mcc:.4f}")
+    log_line = summary_log_fn(summary) if summary_log_fn else f"ACC={acc:.4f} F1={f1:.4f} MCC={mcc:.4f}"
+    print(f"[{model_label}] {log_line}")
     return summary
 
 

@@ -41,9 +41,12 @@ HPO_COLUMNS = {
 NON_GROUP_COLUMNS = {
     "accuracy", "precision", "recall", "macro_f1", "macro_f2", "mcc",
     "cm00", "cm01", "cm10", "cm11", "confusion_matrix_json",
-    "best_val_f1", "best_val_epoch", "monitor_metric",
+    "best_val_metric", "best_val_epoch", "monitor_metric",
     "train_time_sec", "num_test_samples",
     "result_dir", "predictions_csv", "selected_metric",
+    # Ordinal-only metrics (see utils/metrics.py::compute_ordinal_metrics) -
+    # present only on scenario-5 rows, always excluded from grouping either way.
+    "mae", "rmse", "off_by_one_accuracy", "qwk", "linear_kappa", "spearman",
 }
 
 

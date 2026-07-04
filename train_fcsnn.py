@@ -51,6 +51,8 @@ from models.ordinal import (  # noqa: E402
     decode_coral_predictions,
     decode_coral_true_labels,
     ordinal_extra_metrics,
+    ordinal_monitor_metric,
+    ordinal_summary_log,
 )
 from utils.label_processing import is_ordinal_scenario, prepare_split_with_indices  # noqa: E402
 
@@ -156,6 +158,9 @@ def train_one(
         decode_true_fn=decode_coral_true_labels if ordinal else None,
         class_probs_fn=coral_probs_to_class_probs if ordinal else None,
         extra_metrics_fn=ordinal_extra_metrics if ordinal else None,
+        monitor_name="val_qwk" if ordinal else "val_f1",
+        monitor_fn=ordinal_monitor_metric if ordinal else None,
+        summary_log_fn=ordinal_summary_log if ordinal else None,
         extra_summary={
             "ordinal": ordinal,
             "scenario": scenario,
