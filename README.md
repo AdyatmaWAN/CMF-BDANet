@@ -159,8 +159,9 @@ contains:
 
 - `metrics.csv` — one row: every grid parameter + accuracy/precision/recall/
   macro-F1/macro-F2/MCC/confusion-matrix cells/train time/etc. Presence of
-  this file is what marks the run "done". Scenario 5 (ordinal) rows add
-  `mae` and `qwk` columns alongside the standard ones — see
+  this file is what marks the run "done". Scenario 5 (ordinal) rows add six
+  more columns (`mae`, `rmse`, `off_by_one_accuracy`, `qwk`, `linear_kappa`,
+  `spearman`) alongside the standard ones — see
   [Ordinal regression](#ordinal-regression-scenario-5).
 - `predictions.csv` — one row per test sample: `sample_index`,
   `source_index` (maps back to the original dataset row, since scenario 1
@@ -347,17 +348,65 @@ not 4 threshold probabilities — so two conversions happen after prediction:
 
 Standard accuracy/precision/recall/macro-F1/MCC are still computed on the
 decoded integer predictions (so ordinal and nominal scenario 3 results stay
-comparable), but two ordinal-specific metrics are added
-(`compute_ordinal_metrics` in `utils/metrics.py`), because accuracy/F1 still
-can't distinguish "off by 1" from "off by 4":
+comparable), but `compute_ordinal_metrics` in `utils/metrics.py` adds six
+ordinal-specific metrics to every scenario-5 `metrics.csv` row, because
+accuracy/F1 alone can't distinguish "off by 1" from "off by 4":
 
-- **MAE** (mean absolute error) — average `|predicted_class - true_class|`.
+- **`mae`** (mean absolute error) — average `|predicted_class - true_class|`.
   Directly answers "on average, how many damage levels off are we?".
-- **QWK** (quadratic weighted kappa, `sklearn.metrics.cohen_kappa_score(...,
-  weights="quadratic")`) — an agreement score that penalizes a prediction
-  error quadratically more the further apart the classes are (a 4-level
-  miss counts 16x worse than a 1-level miss), while still discounting
-  agreement that could happen by chance the way plain accuracy can't.
+- **`rmse`** (root mean squared error) — like MAE but squares errors before
+  averaging, so a few severe misses (off by 4) inflate it far more than
+  many mild ones (off by 1). Reported alongside MAE because the two only
+  disagree when error *severity* varies — matching MAE with a high RMSE
+  means a handful of bad misses are dragging the average up.
+- **`off_by_one_accuracy`** — fraction of predictions within ±1 class of the
+  truth. The most easily-communicated ordinal metric ("94% of predictions
+  are within one damage level").
+- **`qwk`** (quadratic weighted kappa) — chance-corrected agreement that
+  penalizes an error quadratically more the further apart the classes are
+  (a 4-level miss counts 16x worse than a 1-level miss). The standard
+  single-number summary for ordinal agreement — this is also what drives
+  training/checkpoint monitoring (see below).
+- **`linear_kappa`** — the same idea as QWK but penalizes errors linearly
+  instead of quadratically. Reported alongside QWK because they diverge
+  most when comparing "many mild misses" against "a few severe ones" — if
+  QWK is noticeably lower than linear kappa, the model's mistakes skew
+  toward large jumps rather than being uniformly off-by-a-little.
+- **`spearman`** (Spearman rank correlation) — whether predictions are
+  *monotonically* related to the truth, independent of how large the errors
+  are. A model can score well here with a mediocre MAE if its mistakes are
+  consistently biased in one direction rather than scattered.
+
+### Training-time monitoring and console output
+
+Ordinal scenarios change what gets watched *during* training, not just what
+gets reported afterward:
+
+- **Checkpointing / early stopping / LR-plateau reduction.** Every NN
+  training run tracks a validation metric each epoch (via
+  `make_training_callbacks` in `utils/experiment.py`) that drives
+  `ModelCheckpoint`, `EarlyStopping`, and `ReduceLROnPlateau` alike. For
+  nominal scenarios this is macro-F1 (`val_f1`), same as before. For
+  ordinal scenarios it's **QWK** (`val_qwk`, via
+  `models/ordinal.py::ordinal_monitor_metric`) instead — macro-F1 on
+  decoded ranks would treat every misclassification as equally bad, which
+  defeats the purpose of training an ordinal-aware model in the first
+  place. Both `train_and_evaluate_nn` and `make_training_callbacks` accept
+  `monitor_name`/`monitor_fn` to make this swap, and default to the
+  original macro-F1 behavior when unset.
+- **Per-epoch console line.** Follows directly from the above: you'll see
+  `- val_f1: 0.8123` per epoch for nominal runs and `- val_qwk: 0.9012` for
+  ordinal ones.
+- **End-of-run console line.** `train_and_evaluate_nn` accepts a
+  `summary_log_fn` hook (default prints `ACC=.. F1=.. MCC=..`); ordinal
+  scenarios use `models/ordinal.py::ordinal_summary_log`, which prints
+  `ACC=.. MAE=.. QWK=.. OffByOne=..` instead — the full six-metric set
+  still lands in `metrics.csv` either way, this only changes what's
+  concise enough to scan in the terminal.
+- **`metrics.csv` schema note:** the "best value achieved during training"
+  column is named `best_val_metric` (previously `best_val_f1`) since it now
+  holds either a macro-F1 or a QWK value depending on the run; the
+  `monitor_metric` column next to it always names which one.
 
 ## Shared pipeline code (`utils/experiment.py`)
 
@@ -371,22 +420,25 @@ This is the module every `train_*.py` script is built on:
   Accepts the same `ordinal`/`num_classes` pair as `models/mmfemsnet.py`'s
   `make_dataset()` to CORAL-encode `Y` before building the dataset.
 - `make_training_callbacks()` — early stopping / checkpointing / LR
-  reduction, all monitoring a custom `val_f1` metric computed each epoch
-  (not `val_loss`). Accepts optional `decode_pred_fn`/`decode_true_fn` hooks
-  so `val_f1` can be computed correctly even when the model's raw output
-  isn't a plain sigmoid/softmax (e.g. CORAL's threshold probabilities) —
-  defaults reproduce the original threshold/argmax behavior.
+  reduction, all monitoring a custom validation metric computed each epoch
+  (not `val_loss`) — macro-F1 (`val_f1`) by default, QWK (`val_qwk`) for
+  ordinal runs. Accepts optional `decode_pred_fn`/`decode_true_fn` hooks so
+  the metric can be computed correctly even when the model's raw output
+  isn't a plain sigmoid/softmax (e.g. CORAL's threshold probabilities), and
+  `monitor_name`/`monitor_fn` to swap which metric is tracked — defaults
+  reproduce the original macro-F1/threshold/argmax behavior.
 - `train_and_evaluate_nn()` — the full compile → fit → evaluate → save
   loop shared by FCSNN, MMF-EMSNet, and FUJITA. Each script only builds its
   own datasets + model and calls this once; it returns the summary dict
   that becomes the `metrics.csv` row. (`train_svm.py` doesn't use this —
   no epochs/validation/callbacks for an SVM — it has its own equivalent
-  logic inline.) Five optional parameters — `loss`, `decode_pred_fn`,
-  `decode_true_fn`, `class_probs_fn`, `extra_metrics_fn` — all default to
-  `None` and reproduce today's nominal-classification behavior exactly;
-  `train_fcsnn.py`/`train_mmfemsnet.py`/`train_fujita.py` each supply
-  CORAL-specific versions of all five (from `models/ordinal.py`) only when
-  `is_ordinal_scenario(scenario)` is true.
+  logic inline.) Eight optional parameters — `loss`, `decode_pred_fn`,
+  `decode_true_fn`, `class_probs_fn`, `extra_metrics_fn`, `monitor_name`,
+  `monitor_fn`, `summary_log_fn` — all default to `None` (or the historical
+  macro-F1 behavior) and reproduce today's nominal-classification behavior
+  exactly; `train_fcsnn.py`/`train_mmfemsnet.py`/`train_fujita.py` each
+  supply CORAL-specific versions of all eight (from `models/ordinal.py`)
+  only when `is_ordinal_scenario(scenario)` is true.
 - `grid_search()` — iterates `ablation_grid × hpo_grid`, builds each run's
   result directory, skips already-trained combos, and catches/logs
   per-run exceptions without aborting the whole sweep.

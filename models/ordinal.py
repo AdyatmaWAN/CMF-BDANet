@@ -134,6 +134,27 @@ def coral_probs_to_class_probs(probs: np.ndarray) -> np.ndarray:
 
 
 def ordinal_extra_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
-    """extra_metrics_fn for train_and_evaluate_nn: adds MAE + QWK to metrics.csv."""
-    mae, qwk = compute_ordinal_metrics(y_true, y_pred)
-    return {"mae": mae, "qwk": qwk}
+    """extra_metrics_fn for train_and_evaluate_nn: adds every ordinal metric
+    (mae, rmse, off_by_one_accuracy, qwk, linear_kappa, spearman) to metrics.csv.
+    """
+    return compute_ordinal_metrics(y_true, y_pred)
+
+
+def ordinal_monitor_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """monitor_fn for training callbacks during ordinal training: quadratic
+    weighted kappa (QWK) is the standard single-number summary of ordinal
+    agreement, playing the same role macro-F1 plays for nominal
+    classification, so it drives checkpointing/early-stopping/LR-reduction
+    instead of macro-F1 whenever the scenario is ordinal.
+    """
+    return compute_ordinal_metrics(y_true, y_pred)["qwk"]
+
+
+def ordinal_summary_log(summary: Dict) -> str:
+    """summary_log_fn for train_and_evaluate_nn: the console line printed at
+    the end of an ordinal training run.
+    """
+    return (
+        f"ACC={summary['accuracy']:.4f} MAE={summary['mae']:.4f} "
+        f"QWK={summary['qwk']:.4f} OffByOne={summary['off_by_one_accuracy']:.4f}"
+    )
