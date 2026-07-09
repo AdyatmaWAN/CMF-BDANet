@@ -1,0 +1,26 @@
+{
+  "model": "BDD",
+  "results_root": "results",
+  "seed": 1234,
+  "epochs": 100,
+  "scenarios": [1, 2, 3, 4, 5],
+  "datasets": {
+    "dataset_16": "Dataset/NPZ/dataset_16.npz"
+  },
+  "callbacks": {
+    "early_stopping_patience": 12,
+    "lr_reduce_patience": 6,
+    "lr_reduce_factor": 0.5,
+    "lr_reduce_min_lr": 1e-6,
+    "min_delta": 1e-4
+  },
+  "ablation_grid": {
+    "dsm_mode": ["dsm_density_uncertainty", "dsm_density", "dsm_uncertainty", "dsm_only"],
+    "base_filters": [16, 32]
+  },
+  "hpo_grid": {
+    "optimizer": ["Adam", "SGD", "RMSprop", "Nadam", "Adamax"],
+    "learning_rate": [0.0001, 0.001],
+    "batch_size": [256, 128, 64]
+  }
+}
