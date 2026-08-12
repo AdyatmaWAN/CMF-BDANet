@@ -163,6 +163,10 @@ def train_one(
         pickle.dump(clf, f)
 
     summary = {
+        # ponytail: always False — SVM has no CORAL head, so --scenario
+        # rejects 5. Emitted anyway so SVM rows line up with the NN rows'
+        # `ordinal` column in aggregated_metrics.csv.
+        "ordinal": False,
         "scenario": scenario,
         "dataset": dataset_name,
         "model": model_name,
