@@ -10,21 +10,23 @@ from models.ordinal import add_coral_head
 tensorflow.random.set_seed(1234)
 
 class snn:
-    def __init__(self, num_of_class, input_shape, ordinal=False):
+    def __init__(self, num_of_class, input_shape, ordinal=False, base_filters=32):
         self.n_class = num_of_class
         self.input_shape = input_shape
         self.ordinal = ordinal
+        self.base_filters = base_filters
 
 
     def __build_siamese_model(self):
         inputs =Input(self.input_shape)
 
-        x = Conv2D(32, (3, 3), activation='relu', padding='same')(inputs)
+        bf = self.base_filters
+        x = Conv2D(bf, (3, 3), activation='relu', padding='same')(inputs)
         x = MaxPooling2D((2, 2))(x)
-        x = Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        x = Conv2D(bf * 2, (3, 3), activation='relu', padding='same')(x)
         x = MaxPooling2D((2, 2))(x)
-        x = Conv2D(128, (3, 3), activation='relu', padding='same')(x)
-        x = Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+        x = Conv2D(bf * 4, (3, 3), activation='relu', padding='same')(x)
+        x = Conv2D(bf * 4, (3, 3), activation='relu', padding='same')(x)
         x = Flatten()(x)
 
         return Model(inputs, x)

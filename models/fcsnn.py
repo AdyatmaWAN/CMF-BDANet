@@ -65,6 +65,7 @@ class FCSNN:
         shared: bool,
         fusion: str = "concat",
         ordinal: bool = False,
+        base_filters: int = 32,
     ) -> None:
         self.n_class = num_of_class
         self.is_residual = residual
@@ -76,6 +77,7 @@ class FCSNN:
         self.shared = shared
         self.fusion = fusion
         self.ordinal = ordinal
+        self.base_filters = base_filters
 
     def __build_siamese_model(self) -> Model:
         """
@@ -89,7 +91,8 @@ class FCSNN:
         inputs = layers.Input(self.input_shape, name="fcsnn_input")
         x = inputs
         feats = []
-        convs = [32, 64, 128]
+        bf = self.base_filters
+        convs = [bf, bf * 2, bf * 4]
 
         for conv in convs:
             y = x
@@ -157,7 +160,8 @@ class FCSNN:
 
         if self.substraction:
             distance = layers.Subtract(name="fcsnn_subtract")([feat_a, feat_b])
-            distance = tf.abs(distance)
+            # Lambda wrapper: raw tf ops on symbolic tensors are rejected by Keras 3.
+            distance = layers.Lambda(lambda t: tf.abs(t), name="fcsnn_abs")(distance)
         else:
             distance = layers.Concatenate(name="fcsnn_concat")([feat_a, feat_b])
 
@@ -165,14 +169,16 @@ class FCSNN:
         # (treats feat_a and feat_b as tokens and computes softmax gates).
         if self.fusion == "mcmaf":
             # stack tokens: (B, 2, C)
-            tokens = tf.stack([feat_a, feat_b], axis=1)
+            tokens = layers.Lambda(lambda t: tf.stack(t, axis=1), name="fcsnn_stack")([feat_a, feat_b])
             score_dense = layers.Dense(
                 1,
                 kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
             )
             scores = score_dense(tokens)  # (B, 2, 1)
-            gates = tf.nn.softmax(scores, axis=1)
-            distance = tf.reduce_sum(tokens * gates, axis=1)
+            gates = layers.Softmax(axis=1, name="fcsnn_gates")(scores)
+            distance = layers.Lambda(
+                lambda t: tf.reduce_sum(t[0] * t[1], axis=1), name="fcsnn_gate_sum"
+            )([tokens, gates])
 
         if self.ordinal:
             out = add_coral_head(distance, self.n_class, seed=SEED)

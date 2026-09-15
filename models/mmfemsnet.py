@@ -215,6 +215,7 @@ def build_mmf_emsnet_conv(
     input_shape_rgb: Tuple[int, int, int],
     num_classes: int,
     token_dim: int = 128,
+    base_filters: int = 32,
     concat_post_dsm: bool = True,
     four_stream: bool = False,
     residual: bool = True,
@@ -235,6 +236,7 @@ def build_mmf_emsnet_conv(
         num_classes: 1 for binary (sigmoid), >1 for multi-class (softmax)
             or ordinal (CORAL) when ordinal=True.
         token_dim: Dimension of token embeddings in fusion.
+        base_filters: Width of the conv encoders (levels are bf, 2bf, 4bf).
         ordinal: If True, replace the softmax head with a CORAL ordinal
             head (see models/ordinal.py). Requires num_classes >= 3.
 
@@ -254,7 +256,7 @@ def build_mmf_emsnet_conv(
 
     # DSM Siamese encoder
     dsm_in = layers.Input(input_shape_dsm, name="dsm_encoder_input")
-    dsm_feats = encoder_backbone(dsm_in, base_filters=32, name_prefix="dsm")
+    dsm_feats = encoder_backbone(dsm_in, base_filters=base_filters, name_prefix="dsm")
     dsm_encoder = models.Model(dsm_in, dsm_feats, name="dsm_encoder")
 
     f_pre = dsm_encoder(inp_pre)
@@ -275,7 +277,7 @@ def build_mmf_emsnet_conv(
     if four_stream:
         # Build RGB siamese encoder (shared weights between pre/post RGB)
         rgb_in = layers.Input(input_shape_rgb, name="rgb_encoder_input")
-        rgb_feats = encoder_backbone(rgb_in, base_filters=32, name_prefix="rgb")
+        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb")
         rgb_encoder = models.Model(rgb_in, rgb_feats, name="rgb_encoder")
 
         f_rgb_pre = rgb_encoder(inp_rgb_pre)
@@ -294,7 +296,7 @@ def build_mmf_emsnet_conv(
         else:
             rgbd = inp_rgb
         rgb_in = layers.Input(rgbd.shape[1:], name="rgb_encoder_input")
-        rgb_feats = encoder_backbone(rgb_in, base_filters=32, name_prefix="rgb")
+        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb")
         rgb_encoder = models.Model(rgb_in, rgb_feats, name="rgb_encoder")
         f_rgb = rgb_encoder(rgbd)
 
