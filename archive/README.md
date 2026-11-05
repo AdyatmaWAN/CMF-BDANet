@@ -1,9 +1,9 @@
 # Archive
 
 Pre-consolidation scripts kept for reference, not part of the active pipeline
-(`train_fcsnn.py`, `train_mmfemsnet.py`, `train_fujita.py`, `train_svm.py`).
+(`train_fcsnn.py`, `train_cmf_bdanet.py`, `train_fujita.py`, `train_svm.py`).
 
-- `run_custom_train_infer.py` — single-config MMF-EMSNet train + MCMAF
+- `run_custom_train_infer.py` — single-config CMF-BDANet train + MCMAF
   attention-weight visualization (PNG panels per building/class). Not
   reproduced by the grid-search scripts; kept for interpretability work on a
   specific already-chosen config.

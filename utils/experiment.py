@@ -113,7 +113,7 @@ def make_siamese_dsm_dataset(
     """
     import tensorflow as tf
 
-    from models.mmfemsnet import resolve_dsm_channel_indices
+    from models.cmf_bdanet import resolve_dsm_channel_indices
 
     if ordinal:
         if num_classes is None:
@@ -369,7 +369,7 @@ def train_and_evaluate_nn(
 ) -> Dict:
     """Compile, train, evaluate, and save everything for one already-built
     (uncompiled) Keras model. This is the block every NN `train_*.py` script
-    (FCSNN, MMF-EMSNet, FUJITA) needs identically; only how the model and
+    (FCSNN, CMF-BDANet, FUJITA) needs identically; only how the model and
     datasets are built differs between them, which stays in each script.
 
     `extra_summary` supplies whatever identity/ablation columns the caller
@@ -379,7 +379,7 @@ def train_and_evaluate_nn(
 
     The optional hooks below all default to None, reproducing the original
     nominal-classification behavior exactly. They exist for CORAL ordinal
-    training (see train_mmfemsnet.py / models/ordinal.py), where the loss,
+    training (see train_cmf_bdanet.py / models/ordinal.py), where the loss,
     the model-output -> label decoding, the model-output -> per-class
     probability conversion, and the metric driving checkpointing/early
     stopping/console output are all different from plain softmax/sigmoid:

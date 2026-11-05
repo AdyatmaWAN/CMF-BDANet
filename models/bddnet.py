@@ -31,7 +31,7 @@ damage *classification* network, not a change-detection one. This repo's
 NPZ has no Lidar band and no NIR band, so the two streams are mapped onto
 the nearest available modalities: post-event RGB (channels 3-5) as
 "optical", and post-event nDSM (+ optional density/uncertainty, channels
-10-12, see models/mmfemsnet.py) as "lidar" (both are post-event 3D surface
+10-12, see models/cmf_bdanet.py) as "lidar" (both are post-event 3D surface
 proxies). Pre-event channels are unused, matching the paper (no pre/post
 pair).
 """
@@ -44,7 +44,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
 
-from models.mmfemsnet import POST_NDSM_IDX, POST_DENSITY_IDX, POST_UNC_IDX
+from models.cmf_bdanet import POST_NDSM_IDX, POST_DENSITY_IDX, POST_UNC_IDX
 from models.ordinal import add_coral_head, encode_coral_labels
 
 SEED = 1234

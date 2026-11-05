@@ -1,5 +1,5 @@
 """
-MMF-EMSNet model definition and dataset utilities.
+CMF-BDANet model definition and dataset utilities.
 
 Inputs:
 - DSM pre-event (channel 6-8, dynamically chosen channel)
@@ -47,7 +47,7 @@ POST_UNC_IDX = 12
 
 
 # ============================================================
-# 1. MODEL DEFINITION (MMF-EMSNet)
+# 1. MODEL DEFINITION (CMF-BDANet)
 # ============================================================
 
 
@@ -210,7 +210,7 @@ class MCMAFFusion(layers.Layer):
         return tf.concat(fused_tokens, axis=-1), gates_all
 
 
-def build_mmf_emsnet_conv(
+def build_cmf_bdanet_conv(
     input_shape_dsm: Tuple[int, int, int],
     input_shape_rgb: Tuple[int, int, int],
     num_classes: int,
@@ -223,7 +223,7 @@ def build_mmf_emsnet_conv(
     ordinal: bool = False,
 ) -> tf.keras.Model:
     """
-    Build MMF-EMSNet model using convolutional encoders.
+    Build CMF-BDANet model using convolutional encoders.
 
     Inputs:
         - DSM pre-event (H, W, 1)
@@ -241,7 +241,7 @@ def build_mmf_emsnet_conv(
             head (see models/ordinal.py). Requires num_classes >= 3.
 
     Returns:
-        Keras Model named "MMF_EMSNet".
+        Keras Model named "CMF_BDANet".
     """
     # Inputs
     if four_stream:
@@ -369,13 +369,13 @@ def build_mmf_emsnet_conv(
         model = models.Model(
             inputs=[inp_pre, inp_post, inp_rgb_pre, inp_rgb_post],
             outputs=out,
-            name="MMF_EMSNet_4stream",
+            name="CMF_BDANet_4stream",
         )
     else:
         model = models.Model(
             inputs=[inp_pre, inp_post, inp_rgb],
             outputs=out,
-            name="MMF_EMSNet",
+            name="CMF_BDANet",
         )
     return model
 
@@ -446,7 +446,7 @@ def make_dataset(
     num_classes: int | None = None,
 ) -> tf.data.Dataset:
     """
-    Build tf.data.Dataset for MMF-EMSNet training/evaluation.
+    Build tf.data.Dataset for CMF-BDANet training/evaluation.
 
     Args:
         X: Data array (N, H, W, C).

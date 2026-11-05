@@ -1,5 +1,5 @@
 {
-  "model": "MMF",
+  "model": "CMF",
   "results_root": "results",
   "seed": 1234,
   "epochs": 100,

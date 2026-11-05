@@ -31,7 +31,7 @@ tf.get_logger().setLevel("ERROR")
 from models.bddnet import build_bddnet_model
 from models.fcsnn import FCSNN
 from models.fujita import snn as FujitaSNN
-from models.mmfemsnet import build_mmf_emsnet_conv
+from models.cmf_bdanet import build_cmf_bdanet_conv
 
 # Channel counts matching the default dsm_mode="dsm_density_uncertainty" runs:
 # 3 DSM-side channels (nDSM + density + uncertainty), 3 RGB channels.
@@ -61,8 +61,8 @@ def count_flops(model) -> int:
 def build(name: str, size: int, width: int):
     """Build one model at input size (size, size) and the given base width."""
     dsm, rgb = (size, size, DSM_CH), (size, size, RGB_CH)
-    if name == "MMF-EMSNet":
-        return build_mmf_emsnet_conv(dsm, rgb, NUM_CLASSES, base_filters=width)
+    if name == "CMF-BDANet":
+        return build_cmf_bdanet_conv(dsm, rgb, NUM_CLASSES, base_filters=width)
     if name == "BDD-Net":
         return build_bddnet_model(rgb, dsm, NUM_CLASSES, base_filters=width // 2)
     if name == "FC-SNN":
@@ -76,7 +76,7 @@ def build(name: str, size: int, width: int):
     raise ValueError(name)
 
 
-MODELS = ["MMF-EMSNet", "BDD-Net", "FC-SNN", "Fujita"]
+MODELS = ["CMF-BDANet", "BDD-Net", "FC-SNN", "Fujita"]
 
 
 def sweep(sizes, widths):

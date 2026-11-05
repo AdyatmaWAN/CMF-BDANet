@@ -1,5 +1,5 @@
 """
-Cross-platform reproduction script for MMF-EMSNet Scenarios 1, 2, and 3.
+Cross-platform reproduction script for CMF-BDANet Scenarios 1, 2, and 3.
 Runs the training and evaluation using the parameters from best HPO findings.
 """
 
@@ -90,7 +90,7 @@ def main():
     python_bin = check_python_env()
     
     print("=" * 80)
-    print("MMF-EMSNet Scenario Reproduction Runner")
+    print("CMF-BDANet Scenario Reproduction Runner")
     print(f"Python interpreter:   {python_bin}")
     print(f"Dataset path:         {DATASET_PATH}")
     print(f"Training Epochs:      {EPOCHS}")

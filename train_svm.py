@@ -48,7 +48,7 @@ from utils.experiment import (  # noqa: E402
 from models import Moya as moya_module  # noqa: E402
 from models import Hajeb as hajeb_module  # noqa: E402
 from models.fcsnn import load_dataset  # noqa: E402
-from models.mmfemsnet import extract_inputs  # noqa: E402
+from models.cmf_bdanet import extract_inputs  # noqa: E402
 from utils.label_processing import prepare_split_with_indices  # noqa: E402
 from utils.metrics import compute_metrics  # noqa: E402
 

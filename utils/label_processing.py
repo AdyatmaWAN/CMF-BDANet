@@ -28,7 +28,7 @@ Scenario 5:
     Ordinal regression over the same 5 classes as scenario 3 (identity
     mapping, no row filtering) — the data prep is identical to scenario 3.
     What differs is purely how a model is trained on it (see
-    `is_ordinal_scenario` and models/mmfemsnet.py's CORAL head), not the
+    `is_ordinal_scenario` and models/cmf_bdanet.py's CORAL head), not the
     label mapping.
 """
 

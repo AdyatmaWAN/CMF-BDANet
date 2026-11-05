@@ -1,7 +1,7 @@
 """
 BDD-Net grid-search training entrypoint.
 
-Same shape as train_mmfemsnet.py: reads its grid from a JSON config (default
+Same shape as train_cmf_bdanet.py: reads its grid from a JSON config (default
 configs/bddnet.json), trains+tests every combination, writes metrics.csv +
 predictions.csv + classification report + model artifacts, and skips runs
 whose metrics.csv already exists.
