@@ -1,5 +1,5 @@
 """
-Custom training and inference runner script for MMF-EMSNet.
+Custom training and inference runner script for CMF-BDANet.
 Allows training the model with a custom parameter set, extracting MCMAFFusion weights,
 and saving visualization images and attention weight stats for each class.
 """
@@ -20,9 +20,9 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras import callbacks
 
-from models.mmfemsnet import (
-    build_mmf_emsnet_conv,
-    make_dataset as make_mmf_dataset,
+from models.cmf_bdanet import (
+    build_cmf_bdanet_conv,
+    make_dataset as make_cmf_dataset,
     resolve_dsm_channel_indices,
 )
 from utils.label_processing import prepare_split_for_scenario
@@ -148,7 +148,7 @@ def str2bool(v) -> bool:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Custom Train & Inference for MMF-EMSNet")
+    parser = argparse.ArgumentParser(description="Custom Train & Inference for CMF-BDANet")
     
     # Dataset and model args
     parser.add_argument(
@@ -391,22 +391,22 @@ def main() -> None:
     print(f"Test:  X={X_test.shape}, Y={Y_test.shape}, Bids={bid_test.shape}")
     
     # 3. Create datasets
-    train_ds = make_mmf_dataset(
+    train_ds = make_cmf_dataset(
         X_train, Y_train, batch=args.batch_size, shuffle=True,
         include_density=include_density, include_unc=include_unc, four_stream=args.four_stream
     )
-    val_ds = make_mmf_dataset(
+    val_ds = make_cmf_dataset(
         X_val, Y_val, batch=args.batch_size, shuffle=False,
         include_density=include_density, include_unc=include_unc, four_stream=args.four_stream
     )
-    test_ds = make_mmf_dataset(
+    test_ds = make_cmf_dataset(
         X_test, Y_test, batch=args.batch_size, shuffle=False,
         include_density=include_density, include_unc=include_unc, four_stream=args.four_stream
     )
     
     # 4. Build Model
     H, W = X_train.shape[1], X_train.shape[2]
-    model = build_mmf_emsnet_conv(
+    model = build_cmf_bdanet_conv(
         input_shape_dsm=(H, W, dsm_channels),
         input_shape_rgb=(H, W, 3),
         num_classes=num_classes,

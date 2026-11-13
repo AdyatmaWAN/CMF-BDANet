@@ -5,7 +5,7 @@ model) + RGB imagery. Five models are trained and compared across five
 classification scenarios:
 
 - **FCSNN** — Siamese CNN over pre/post DSM tensors.
-- **MMF-EMSNet** — multi-modal fusion network combining DSM-difference
+- **CMF-BDANet** — multi-modal fusion network combining DSM-difference
   features with an RGB stream (3-stream or 4-stream variants).
 - **FUJITA** — baseline Siamese CNN (from the Fujita et al. method).
 - **Moya**, **Hajeb** — hand-crafted-feature SVM baselines (height-difference
@@ -19,7 +19,7 @@ classification scenarios:
 | 2 | binary | classes {0,1,2,3} vs class 4 | all 5 |
 | 3 | multiclass | all 5 classes (nominal — classes are unordered categories) | all 5 |
 | 4 | binary | classes {0,1} vs {2,3,4} | all 5 |
-| 5 | ordinal regression | same 5 classes as scenario 3, but the model is trained to respect their order (0 < 1 < 2 < 3 < 4) instead of treating them as unordered categories | FCSNN, MMF-EMSNet, FUJITA (not the SVM baselines, no clean CORAL-for-SVM equivalent) |
+| 5 | ordinal regression | same 5 classes as scenario 3, but the model is trained to respect their order (0 < 1 < 2 < 3 < 4) instead of treating them as unordered categories | FCSNN, CMF-BDANet, FUJITA (not the SVM baselines, no clean CORAL-for-SVM equivalent) |
 
 Scenario 5 is explained in full in [Ordinal regression (scenario 5)](#ordinal-regression-scenario-5) below.
 
@@ -28,16 +28,16 @@ Scenario 5 is explained in full in [Ordinal regression (scenario 5)](#ordinal-re
 ```
 configs/            One JSON config per model family (grid definitions)
   fcsnn.json
-  mmfemsnet.json
+  cmf_bdanet.json
   fujita.json
   svm.json           (covers both Moya and Hajeb)
 
 models/              Model definitions + shared data-loading
   fcsnn.py           FCSNN model + load_dataset() (NPZ loader used by every script)
-  mmfemsnet.py       MMF-EMSNet model + DSM/RGB channel extraction + tf.data pipeline
+  cmf_bdanet.py       CMF-BDANet model + DSM/RGB channel extraction + tf.data pipeline
   fujita.py          FUJITA baseline model
   ordinal.py         Shared CORAL ordinal head (CoralBiases, add_coral_head) + label
-                     encode/decode, used by fcsnn.py, mmfemsnet.py, and fujita.py
+                     encode/decode, used by fcsnn.py, cmf_bdanet.py, and fujita.py
   Moya.py            Moya SVM feature extractor (feature_difference)
   Hajeb.py           Hajeb SVM feature extractor (dsm_difference)
 
@@ -48,7 +48,7 @@ utils/               Shared, model-agnostic pipeline code
                      plus ordinal MAE/QWK (compute_ordinal_metrics)
 
 train_fcsnn.py       Grid-search entrypoint for FCSNN
-train_mmfemsnet.py   Grid-search entrypoint for MMF-EMSNet
+train_cmf_bdanet.py   Grid-search entrypoint for CMF-BDANet
 train_fujita.py      Grid-search entrypoint for FUJITA
 train_svm.py         Grid-search entrypoint for Moya + Hajeb
 
@@ -65,7 +65,7 @@ archive/             Pre-consolidation scripts kept for reference (see archive/R
 Every model reads the same NPZ file via `models/fcsnn.py::load_dataset`,
 which expects six arrays: `X_train, Y_train, X_val, Y_val, X_test, Y_test`.
 `X_*` has shape `(N, H, W, C)` with a fixed channel layout (see
-`models/mmfemsnet.py`):
+`models/cmf_bdanet.py`):
 
 ```
 0-2   pre-event RGB
@@ -95,15 +95,15 @@ python train_fcsnn.py --scenario 1                        # just scenario 1
 python train_fcsnn.py --scenario 4                        # the {0,1} vs {2,3,4} binary scenario
 python train_fcsnn.py --scenario 5 --residual true --fusion mcmaf   # ordinal regression (CORAL)
 python train_fcsnn.py --dsm-mode dsm_only                 # just one DSM mode
-python train_mmfemsnet.py --variant 4stream                # just the 4-stream MMF variant
-python train_mmfemsnet.py --scenario 5                     # ordinal regression (CORAL)
+python train_cmf_bdanet.py --variant 4stream                # just the 4-stream CMF-BDANet variant
+python train_cmf_bdanet.py --scenario 5                     # ordinal regression (CORAL)
 python train_fujita.py --scenario 5                        # ordinal regression (CORAL)
 python train_svm.py --model Moya --scenario 2              # just Moya, scenario 2
 ```
 
 Scenarios 1-4 work identically across all four scripts. Scenario 5 (ordinal
 regression via CORAL) is wired up for the three neural nets —
-`train_fcsnn.py`, `train_mmfemsnet.py`, `train_fujita.py` all accept
+`train_fcsnn.py`, `train_cmf_bdanet.py`, `train_fujita.py` all accept
 `--scenario 5` and share the same `models/ordinal.py` head. `train_svm.py`
 does not (`--scenario` choices are `[1,2,3,4]`) since there's no clean CORAL
 equivalent for the SVM baselines — passing `--scenario 5` to it fails fast
@@ -126,7 +126,7 @@ Each config in `configs/` has two grids plus shared settings:
   "results_root": "results",
   "seed": 1234,
   "epochs": 100,
-  "scenarios": [1, 2, 3, 4],       // mmfemsnet.json also includes 5 (ordinal)
+  "scenarios": [1, 2, 3, 4],       // cmf_bdanet.json also includes 5 (ordinal)
   "datasets": { "dataset_16": "Dataset/NPZ/dataset_16.npz" },
   "callbacks": { "early_stopping_patience": 12, "lr_reduce_patience": 6, ... },
 
@@ -144,8 +144,8 @@ Each config in `configs/` has two grids plus shared settings:
 ```
 
 - `ablation_grid` — architecture/data variants you're comparing (dsm_mode
-  everywhere; `residual`/`fusion` for FCSNN and MMF-EMSNet; `variant`
-  — `3stream_concat`/`3stream_no_concat`/`4stream` — for MMF-EMSNet only).
+  everywhere; `residual`/`fusion` for FCSNN and CMF-BDANet; `variant`
+  — `3stream_concat`/`3stream_no_concat`/`4stream` — for CMF-BDANet only).
 - `hpo_grid` — pure hyperparameter tuning: optimizer/lr/batch_size for the
   neural nets, kernel/decision_function/C/gamma for the SVMs.
 - Edit these lists to narrow or widen a sweep; `--scenario`/`--dsm-mode`
@@ -176,7 +176,7 @@ contains:
 Directory shape per model:
 ```
 FCSNN:        scenario_N/FCSNN/<dataset>/<dsm_mode>/residual_<bool>/fusion_<tag>/<opt>_lr<lr>_bs<bs>/
-MMF-EMSNet:   scenario_N/MMF/<dataset>/<dsm_mode>/<variant>/residual_<bool>/fusion_<tag>/<opt>_lr<lr>_bs<bs>/
+CMF-BDANet:   scenario_N/CMF/<dataset>/<dsm_mode>/<variant>/residual_<bool>/fusion_<tag>/<opt>_lr<lr>_bs<bs>/
 FUJITA:       scenario_N/FUJITA/<dataset>/<dsm_mode>/<opt>_lr<lr>_bs<bs>/
 Moya/Hajeb:   scenario_N/<Moya|Hajeb>/<dataset>/<dsm_mode>/dec_<f>_kernel_<k>_C_<c>_gamma_<g>/
 ```
@@ -211,7 +211,7 @@ that was part of the run. Since every model's results already live nested
 under `results/scenario_N/{MODEL}/...`, scoping the scan that way picks up
 *every* model that has ever been trained for that scenario, not just the one
 that just finished. So training FCSNN for scenario 4, then later training
-MMF-EMSNet for scenario 4, leaves
+CMF-BDANet for scenario 4, leaves
 `results/scenario_4/aggregated_metrics.csv` and `best_overall.csv` reflecting
 both models — no manual aggregation step needed. This is on by default and
 unconditional (it re-scans even if every run in this invocation was skipped
@@ -233,7 +233,7 @@ increasing damage severity — so a model that mixes up adjacent classes
 4), and neither the loss nor accuracy/macro-F1 can tell the difference.
 Scenario 5 reuses scenario 3's exact data but trains and evaluates the model
 in a way that's aware of this order. It's available for all three neural
-nets — FCSNN, MMF-EMSNet, FUJITA — all sharing the same CORAL head from
+nets — FCSNN, CMF-BDANet, FUJITA — all sharing the same CORAL head from
 `models/ordinal.py`. It's not available for the SVM baselines (Moya/Hajeb):
 `SVC` has no clean CORAL-style ordinal equivalent, so `train_svm.py`
 doesn't accept `--scenario 5`.
@@ -287,7 +287,7 @@ a logical contradiction (if it's worse than 2, it must also be worse than
   answers can never contradict each other.
 - `add_coral_head(x, num_classes)` in `models/ordinal.py` wires the shared
   `Dense(1, use_bias=False)` + `CoralBiases` pair onto a model's penultimate
-  feature tensor `x` in one call — `models/fcsnn.py`, `models/mmfemsnet.py`,
+  feature tensor `x` in one call — `models/fcsnn.py`, `models/cmf_bdanet.py`,
   and `models/fujita.py` all use this same function for their `ordinal=True`
   head, so there's exactly one CORAL implementation, not three.
 
@@ -314,7 +314,7 @@ In code this needs no custom loss function at all: Keras's built-in
 `(batch, 4)` against an encoded target of shape `(batch, 4)`, already
 computes exactly this — elementwise BCE across all 4 thresholds, averaged
 over the batch. Every ordinal-capable script (`train_fcsnn.py`,
-`train_mmfemsnet.py`, `train_fujita.py`) passes `loss="binary_crossentropy"`
+`train_cmf_bdanet.py`, `train_fujita.py`) passes `loss="binary_crossentropy"`
 whenever `is_ordinal_scenario(scenario)` is true; `train_and_evaluate_nn`'s
 auto-selected loss would otherwise pick `sparse_categorical_crossentropy`
 for a 5-class problem, which is wrong here since the labels aren't
@@ -417,7 +417,7 @@ This is the module every `train_*.py` script is built on:
 - `DSM_MODES` / `dsm_mode_channels()` — the shared dsm_mode ablation axis.
 - `make_siamese_dsm_dataset()` — the (pre-DSM, post-DSM) tf.data pipeline
   shared by FCSNN and FUJITA (both take the same two-tensor input shape).
-  Accepts the same `ordinal`/`num_classes` pair as `models/mmfemsnet.py`'s
+  Accepts the same `ordinal`/`num_classes` pair as `models/cmf_bdanet.py`'s
   `make_dataset()` to CORAL-encode `Y` before building the dataset.
 - `make_training_callbacks()` — early stopping / checkpointing / LR
   reduction, all monitoring a custom validation metric computed each epoch
@@ -428,7 +428,7 @@ This is the module every `train_*.py` script is built on:
   `monitor_name`/`monitor_fn` to swap which metric is tracked — defaults
   reproduce the original macro-F1/threshold/argmax behavior.
 - `train_and_evaluate_nn()` — the full compile → fit → evaluate → save
-  loop shared by FCSNN, MMF-EMSNet, and FUJITA. Each script only builds its
+  loop shared by FCSNN, CMF-BDANet, and FUJITA. Each script only builds its
   own datasets + model and calls this once; it returns the summary dict
   that becomes the `metrics.csv` row. (`train_svm.py` doesn't use this —
   no epochs/validation/callbacks for an SVM — it has its own equivalent
@@ -436,7 +436,7 @@ This is the module every `train_*.py` script is built on:
   `decode_true_fn`, `class_probs_fn`, `extra_metrics_fn`, `monitor_name`,
   `monitor_fn`, `summary_log_fn` — all default to `None` (or the historical
   macro-F1 behavior) and reproduce today's nominal-classification behavior
-  exactly; `train_fcsnn.py`/`train_mmfemsnet.py`/`train_fujita.py` each
+  exactly; `train_fcsnn.py`/`train_cmf_bdanet.py`/`train_fujita.py` each
   supply CORAL-specific versions of all eight (from `models/ordinal.py`)
   only when `is_ordinal_scenario(scenario)` is true.
 - `grid_search()` — iterates `ablation_grid × hpo_grid`, builds each run's
@@ -451,6 +451,6 @@ This is the module every `train_*.py` script is built on:
 ## Archive
 
 `archive/` holds pre-consolidation scripts that aren't part of the grid-search
-pipeline but still have unreproduced value (single-config MMF-EMSNet training
+pipeline but still have unreproduced value (single-config CMF-BDANet training
 with MCMAF attention-weight visualization, and the reproduction wrapper
 around it). See `archive/README.md` for why they're kept instead of deleted.

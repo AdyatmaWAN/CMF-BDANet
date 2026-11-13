@@ -45,7 +45,7 @@ from utils.experiment import (  # noqa: E402
     train_and_evaluate_nn,
 )
 from models.fcsnn import FCSNN, load_dataset  # noqa: E402
-from models.mmfemsnet import resolve_dsm_channel_indices  # noqa: E402
+from models.cmf_bdanet import resolve_dsm_channel_indices  # noqa: E402
 from models.ordinal import (  # noqa: E402
     coral_probs_to_class_probs,
     decode_coral_predictions,

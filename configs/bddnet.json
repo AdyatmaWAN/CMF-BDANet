@@ -1,5 +1,5 @@
 {
-  "model": "MMF",
+  "model": "BDD",
   "results_root": "results",
   "seed": 1234,
   "epochs": 100,
@@ -16,9 +16,7 @@
   },
   "ablation_grid": {
     "dsm_mode": ["dsm_density_uncertainty", "dsm_density", "dsm_uncertainty", "dsm_only"],
-    "variant": ["3stream_concat", "3stream_no_concat", "4stream"],
-    "residual": [true, false],
-    "fusion": ["concat", "mcmaf"]
+    "base_filters": [16, 32]
   },
   "hpo_grid": {
     "optimizer": ["Adam", "SGD", "RMSprop", "Nadam", "Adamax"],

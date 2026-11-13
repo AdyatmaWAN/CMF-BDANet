@@ -1,8 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: Reproduction Batch Script for MMF-EMSNet Scenarios
-:: This script trains and evaluates MMF-EMSNet models under the three specific configurations
+:: Reproduction Batch Script for CMF-BDANet Scenarios
+:: This script trains and evaluates CMF-BDANet models under the three specific configurations
 :: retrieved from HPO best results.
 
 :: Configuration Variables (Edit as needed)
@@ -12,7 +12,7 @@ set NUM_SAMPLES_PER_CLASS=5
 set DATASET=Dataset/NPZ/dataset_16.npz
 
 echo =======================================================================
-echo Starting Reproduction Run for MMF-EMSNet Scenarios
+echo Starting Reproduction Run for CMF-BDANet Scenarios
 echo Python Executable: %PYTHON_PATH%
 echo Epochs:            %EPOCHS%
 echo Dataset:           %DATASET%

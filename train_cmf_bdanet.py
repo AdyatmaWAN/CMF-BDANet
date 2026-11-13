@@ -1,8 +1,8 @@
 """
-MMF-EMSNet grid-search training entrypoint.
+CMF-BDANet grid-search training entrypoint.
 
 Same shape as train_fcsnn.py: reads its grid from a JSON config (default
-configs/mmfemsnet.json), trains+tests every combination, writes
+configs/cmf_bdanet.json), trains+tests every combination, writes
 metrics.csv + predictions.csv + classification report + model artifacts,
 and skips runs whose metrics.csv already exists.
 
@@ -17,9 +17,9 @@ and models/ordinal.py's CORAL head for the mechanics, and the README's
 "Ordinal regression (scenario 5)" section for the full explanation.
 
 Usage:
-    python train_mmfemsnet.py
-    python train_mmfemsnet.py --config configs/mmfemsnet.json --scenario 1
-    python train_mmfemsnet.py --scenario 5   # ordinal regression (CORAL)
+    python train_cmf_bdanet.py
+    python train_cmf_bdanet.py --config configs/cmf_bdanet.json --scenario 1
+    python train_cmf_bdanet.py --scenario 5   # ordinal regression (CORAL)
 """
 
 from __future__ import annotations
@@ -45,9 +45,9 @@ from utils.experiment import (  # noqa: E402
     train_and_evaluate_nn,
 )
 from models.fcsnn import load_dataset  # noqa: E402
-from models.mmfemsnet import (  # noqa: E402
-    build_mmf_emsnet_conv,
-    make_dataset as make_mmf_dataset,
+from models.cmf_bdanet import (  # noqa: E402
+    build_cmf_bdanet_conv,
+    make_dataset as make_cmf_dataset,
     resolve_dsm_channel_indices,
 )
 from models.ordinal import (  # noqa: E402
@@ -73,7 +73,7 @@ def decode_variant(variant: str) -> Tuple[bool, bool]:
         return False, True
     if variant == "3stream_no_concat":
         return False, False
-    raise ValueError(f"Unknown MMF variant: {variant}")
+    raise ValueError(f"Unknown CMF-BDANet variant: {variant}")
 
 
 def build_result_dir(
@@ -93,7 +93,7 @@ def build_result_dir(
     return os.path.join(
         results_root,
         f"scenario_{scenario}",
-        "MMF",
+        "CMF",
         dataset_name,
         dsm_mode,
         variant,
@@ -126,20 +126,20 @@ def train_one(
     ordinal = is_ordinal_scenario(scenario)
 
     print(
-        f"\n===== [MMF] scenario={scenario} dataset={dataset_name} dsm={dsm_mode} variant={variant} "
+        f"\n===== [CMF] scenario={scenario} dataset={dataset_name} dsm={dsm_mode} variant={variant} "
         f"residual={residual} fusion={fusion} opt={optimizer} lr={learning_rate} bs={batch_size} "
         f"ordinal={ordinal} ====="
     )
 
-    train_ds = make_mmf_dataset(
+    train_ds = make_cmf_dataset(
         X_train, Y_train, batch_size, True, include_density, include_unc, four_stream,
         ordinal=ordinal, num_classes=num_classes,
     )
-    val_ds = make_mmf_dataset(
+    val_ds = make_cmf_dataset(
         X_val, Y_val, batch_size, False, include_density, include_unc, four_stream,
         ordinal=ordinal, num_classes=num_classes,
     )
-    test_ds = make_mmf_dataset(
+    test_ds = make_cmf_dataset(
         X_test, Y_test, batch_size, False, include_density, include_unc, four_stream,
         ordinal=ordinal, num_classes=num_classes,
     )
@@ -148,7 +148,7 @@ def train_one(
     dsm_channels = len(resolve_dsm_channel_indices(include_density, include_unc)[0])
 
     set_tf_determinism(seed)
-    model = build_mmf_emsnet_conv(
+    model = build_cmf_bdanet_conv(
         input_shape_dsm=(H, W, dsm_channels),
         input_shape_rgb=(H, W, 3),
         num_classes=num_classes,
@@ -163,7 +163,7 @@ def train_one(
     return train_and_evaluate_nn(
         result_dir=result_dir,
         model=model,
-        model_label="MMF",
+        model_label="CMF",
         num_classes=num_classes,
         optimizer_name=optimizer,
         learning_rate=learning_rate,
@@ -198,7 +198,7 @@ def train_one(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/mmfemsnet.json")
+    parser.add_argument("--config", type=str, default="configs/cmf_bdanet.json")
     parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
     parser.add_argument("--variant", type=str, default=None, choices=VARIANTS)
@@ -263,7 +263,7 @@ def main() -> None:
 
     if all_results:
         os.makedirs(results_root, exist_ok=True)
-        pd.DataFrame(all_results).to_csv(os.path.join(results_root, "MMF_grid_summary.csv"), index=False)
+        pd.DataFrame(all_results).to_csv(os.path.join(results_root, "CMF_grid_summary.csv"), index=False)
 
     aggregate_scenarios_after_run(results_root, scenarios)
 

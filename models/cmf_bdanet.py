@@ -1,5 +1,5 @@
 """
-MMF-EMSNet model definition and dataset utilities.
+CMF-BDANet model definition and dataset utilities.
 
 Inputs:
 - DSM pre-event (channel 6-8, dynamically chosen channel)
@@ -47,7 +47,7 @@ POST_UNC_IDX = 12
 
 
 # ============================================================
-# 1. MODEL DEFINITION (MMF-EMSNet)
+# 1. MODEL DEFINITION (CMF-BDANet)
 # ============================================================
 
 
@@ -210,11 +210,12 @@ class MCMAFFusion(layers.Layer):
         return tf.concat(fused_tokens, axis=-1), gates_all
 
 
-def build_mmf_emsnet_conv(
+def build_cmf_bdanet_conv(
     input_shape_dsm: Tuple[int, int, int],
     input_shape_rgb: Tuple[int, int, int],
     num_classes: int,
     token_dim: int = 128,
+    base_filters: int = 32,
     concat_post_dsm: bool = True,
     four_stream: bool = False,
     residual: bool = True,
@@ -222,7 +223,7 @@ def build_mmf_emsnet_conv(
     ordinal: bool = False,
 ) -> tf.keras.Model:
     """
-    Build MMF-EMSNet model using convolutional encoders.
+    Build CMF-BDANet model using convolutional encoders.
 
     Inputs:
         - DSM pre-event (H, W, 1)
@@ -235,11 +236,12 @@ def build_mmf_emsnet_conv(
         num_classes: 1 for binary (sigmoid), >1 for multi-class (softmax)
             or ordinal (CORAL) when ordinal=True.
         token_dim: Dimension of token embeddings in fusion.
+        base_filters: Width of the conv encoders (levels are bf, 2bf, 4bf).
         ordinal: If True, replace the softmax head with a CORAL ordinal
             head (see models/ordinal.py). Requires num_classes >= 3.
 
     Returns:
-        Keras Model named "MMF_EMSNet".
+        Keras Model named "CMF_BDANet".
     """
     # Inputs
     if four_stream:
@@ -254,7 +256,7 @@ def build_mmf_emsnet_conv(
 
     # DSM Siamese encoder
     dsm_in = layers.Input(input_shape_dsm, name="dsm_encoder_input")
-    dsm_feats = encoder_backbone(dsm_in, base_filters=32, name_prefix="dsm")
+    dsm_feats = encoder_backbone(dsm_in, base_filters=base_filters, name_prefix="dsm")
     dsm_encoder = models.Model(dsm_in, dsm_feats, name="dsm_encoder")
 
     f_pre = dsm_encoder(inp_pre)
@@ -275,7 +277,7 @@ def build_mmf_emsnet_conv(
     if four_stream:
         # Build RGB siamese encoder (shared weights between pre/post RGB)
         rgb_in = layers.Input(input_shape_rgb, name="rgb_encoder_input")
-        rgb_feats = encoder_backbone(rgb_in, base_filters=32, name_prefix="rgb")
+        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb")
         rgb_encoder = models.Model(rgb_in, rgb_feats, name="rgb_encoder")
 
         f_rgb_pre = rgb_encoder(inp_rgb_pre)
@@ -294,7 +296,7 @@ def build_mmf_emsnet_conv(
         else:
             rgbd = inp_rgb
         rgb_in = layers.Input(rgbd.shape[1:], name="rgb_encoder_input")
-        rgb_feats = encoder_backbone(rgb_in, base_filters=32, name_prefix="rgb")
+        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb")
         rgb_encoder = models.Model(rgb_in, rgb_feats, name="rgb_encoder")
         f_rgb = rgb_encoder(rgbd)
 
@@ -367,13 +369,13 @@ def build_mmf_emsnet_conv(
         model = models.Model(
             inputs=[inp_pre, inp_post, inp_rgb_pre, inp_rgb_post],
             outputs=out,
-            name="MMF_EMSNet_4stream",
+            name="CMF_BDANet_4stream",
         )
     else:
         model = models.Model(
             inputs=[inp_pre, inp_post, inp_rgb],
             outputs=out,
-            name="MMF_EMSNet",
+            name="CMF_BDANet",
         )
     return model
 
@@ -444,7 +446,7 @@ def make_dataset(
     num_classes: int | None = None,
 ) -> tf.data.Dataset:
     """
-    Build tf.data.Dataset for MMF-EMSNet training/evaluation.
+    Build tf.data.Dataset for CMF-BDANet training/evaluation.
 
     Args:
         X: Data array (N, H, W, C).

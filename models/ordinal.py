@@ -1,5 +1,5 @@
 """
-CORAL ordinal-regression head shared by FCSNN, MMF-EMSNet, and FUJITA.
+CORAL ordinal-regression head shared by FCSNN, CMF-BDANet, and FUJITA.
 
 Source: Cao, W., Mirjalili, V., & Raschka, S. (2020). "Rank Consistent
 Ordinal Regression for Neural Networks with Application to Age Estimation."
