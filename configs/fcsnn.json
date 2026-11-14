@@ -1,11 +1,11 @@
 {
   "model": "FCSNN",
   "results_root": "results",
-  "seed": 1234,
+  "seeds": [12345, 23451, 34512, 45123, 51234],
   "epochs": 100,
   "scenarios": [1, 2, 3, 4, 5],
   "datasets": {
-    "dataset_16": "Dataset/NPZ/dataset_16.npz"
+    "dataset_16": "Dataset/NPZ_spatial/dataset_16.npz"
   },
   "callbacks": {
     "early_stopping_patience": 12,
@@ -15,13 +15,21 @@
     "min_delta": 1e-4
   },
   "ablation_grid": {
-    "dsm_mode": ["dsm_density_uncertainty", "dsm_density", "dsm_uncertainty", "dsm_only"],
-    "residual": [true, false],
-    "fusion": ["concat", "mcmaf"]
+    "dsm_mode": ["dsm_only"],
+    "fusion": ["sub", "concat"],
+    "shared": [true, false],
+    "dropout": [true, false],
+    "dense": [true, false],
+    "base_filters": [32]
   },
   "hpo_grid": {
-    "optimizer": ["Adam", "SGD", "RMSprop", "Nadam", "Adamax"],
+    "optimizer": ["Adam", "Nadam", "SGD"],
     "learning_rate": [0.0001, 0.001],
-    "batch_size": [256, 128, 64]
+    "batch_size": [64, 128, 256]
+  },
+  "capacity_control": {
+    "shared": false,
+    "base_filters": 22,
+    "comment": "Parameter-matched control: 2 towers at bf=22 is 1.038x one tower at bf=32 (verified by tests/test_fcsnn_shapes.py). Not a reported arm; see docs/EXPERIMENT_PLAN.md."
   }
 }

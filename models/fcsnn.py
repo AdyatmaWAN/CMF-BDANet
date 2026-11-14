@@ -1,15 +1,36 @@
 """
 FCSNN (Siamese Neural Network) model definition and dataset utilities.
 
-Architecture:
-- Shared Siamese tower with 3 conv blocks.
-- Optional residual-style concatenation of intermediate features.
-- Optional dense layers.
-- Final head supports binary (num_classes=1) or multi-class (num_classes>1).
+Architecture (see docs/EXPERIMENT_PLAN.md and the architecture diagrams):
+
+    Convolution Block(N):
+        (Conv2D(N) -> BatchNorm -> ReLU) x num_of_layer
+        -> MaxPooling2D(2, 2)
+        -> Dropout(0.5)          [only when dropout=True]
+
+    Tower (per arm):
+        Conv Block(bf) -> Conv Block(2*bf) -> Conv Block(4*bf)
+        Flatten(last block) -> Dense Block(256)        [only when dense=True]
+        Concat([Flatten(block1), Flatten(block2), Flatten(block3), dense])
+                                                       [only when residual=True]
+
+    Head:
+        fuse(tower(pre), tower(post)) -> Dense(n, sigmoid/softmax) or CORAL
+
+`fusion` is a single parameter with one conditional sequence:
+
+    "sub"    -> abs(a - b)                  (the historical FCSNN behaviour)
+    "concat" -> Concatenate([a, b])         (pseudo-siamese concatenation)
+    "mcmaf"  -> softmax-gated weighted sum of a and b treated as two tokens
+
+`shared=True` reuses one tower for both inputs (true Siamese); `shared=False`
+builds two independent towers (pseudo-Siamese), each with its own seed so they
+do not start from identical weights.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import Tuple
 
 import numpy as np
@@ -19,9 +40,12 @@ from tensorflow.keras.regularizers import l2
 
 from models.ordinal import add_coral_head
 
-# Global seed for deterministic initializers inside this module
+# Default seed, used only when a caller does not pass one explicitly. Every
+# random op in this module reads the instance's `seed`, never a module global,
+# so N different seeds really do produce N different initialisations.
 SEED = 1234
-tf.random.set_seed(SEED)
+
+FUSIONS = ("sub", "concat", "mcmaf")
 
 
 # ============================================================
@@ -35,22 +59,26 @@ class FCSNN:
     using pre- and post-DSM tensors.
 
     Args:
-        num_of_class: Number of classes for classification.
-                      - 1 → binary (sigmoid)
-                      - >1 → multi-class (softmax), or ordinal (CORAL) when
+        num_of_class: Number of classes.
+                      - 1 -> binary (sigmoid)
+                      - >1 -> multi-class (softmax), or ordinal (CORAL) when
                         ordinal=True
-        residual: If True, concatenates flattened intermediate features.
-        dropout: If True, enables dropout after pooling/dense.
-        dense: If True, adds dense layers before final head.
-        num_of_layer: Number of conv (and dense) layers per block.
-        input_shape: Input tensor shape (H, W, C), where C can be
-                     nDSM only or nDSM+density and/or nDSM+unc.
-        substraction: If True, use absolute difference of embeddings;
-                      otherwise, concatenate embeddings.
-        shared: If True, share Siamese tower; else use separate towers.
-        ordinal: If True, replace the sigmoid/softmax head with a CORAL
-                 ordinal head (see models/ordinal.py). Requires
-                 num_of_class >= 3.
+        residual: If True, concatenates the flattened output of every conv
+                  block with the dense output inside each tower.
+        dropout: If True, adds Dropout(0.5) after each block's MaxPooling.
+        dense: If True, adds one Dense(256)+ReLU block after the final
+               flatten, before the residual concatenation.
+        num_of_layer: Number of Conv->BN->ReLU repeats per conv block.
+        input_shape: Input tensor shape (H, W, C).
+        fusion: How the two tower embeddings are combined — one of
+                "sub", "concat", "mcmaf" (see module docstring).
+        shared: If True, share one Siamese tower; else two independent towers.
+        ordinal: If True, use a CORAL ordinal head instead of sigmoid/softmax.
+                 Requires num_of_class >= 3.
+        base_filters: Conv width; blocks are (bf, 2*bf, 4*bf).
+        seed: Seed for every initializer and dropout mask in this model.
+        substraction: Deprecated. `substraction=True` is an alias for
+                      `fusion="sub"`. Kept so older callers keep working.
     """
 
     def __init__(
@@ -61,40 +89,51 @@ class FCSNN:
         dense: bool,
         num_of_layer: int,
         input_shape: Tuple[int, int, int],
-        substraction: bool,
         shared: bool,
-        fusion: str = "concat",
+        fusion: str = "sub",
         ordinal: bool = False,
         base_filters: int = 32,
+        seed: int = SEED,
+        substraction: bool | None = None,
     ) -> None:
+        if substraction is not None:
+            warnings.warn(
+                "FCSNN(substraction=...) is deprecated; pass fusion='sub' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if substraction:
+                fusion = "sub"
+
+        if fusion not in FUSIONS:
+            raise ValueError(f"fusion must be one of {FUSIONS}, got {fusion!r}")
+
         self.n_class = num_of_class
         self.is_residual = residual
         self.is_dropout = dropout
         self.is_dense = dense
         self.num_of_layer = num_of_layer
         self.input_shape = input_shape
-        self.substraction = substraction
         self.shared = shared
         self.fusion = fusion
         self.ordinal = ordinal
         self.base_filters = base_filters
+        self.seed = seed
 
-    def __build_siamese_model(self) -> Model:
-        """
-        Build the base Siamese tower.
+    def _init(self, seed: int):
+        return tf.keras.initializers.GlorotUniform(seed=seed)
 
-        Conv channels: [32, 64, 128]
-        Each block:
-            (Conv → BN → ReLU) × num_of_layer → MaxPool(2x2) → optional Dropout
-        Optionally collects intermediate flattened tensors for residual concat.
+    def __build_siamese_model(self, seed: int, name: str) -> Model:
+        """Build one tower. `seed` drives every initializer and dropout mask in
+        it, so two unshared towers built with different seeds do not start from
+        identical weights.
         """
-        inputs = layers.Input(self.input_shape, name="fcsnn_input")
+        inputs = layers.Input(self.input_shape, name=f"{name}_input")
         x = inputs
         feats = []
         bf = self.base_filters
-        convs = [bf, bf * 2, bf * 4]
 
-        for conv in convs:
+        for conv in (bf, bf * 2, bf * 4):
             y = x
             for _ in range(self.num_of_layer):
                 y = layers.Conv2D(
@@ -102,104 +141,89 @@ class FCSNN:
                     (3, 3),
                     padding="same",
                     kernel_regularizer=l2(1e-4),
-                    kernel_initializer=tf.keras.initializers.GlorotUniform(
-                        seed=SEED
-                    ),
+                    kernel_initializer=self._init(seed),
                 )(y)
                 y = layers.BatchNormalization()(y)
                 y = layers.Activation("relu")(y)
 
             y = layers.MaxPooling2D(pool_size=(2, 2))(y)
             if self.is_dropout:
-                y = layers.Dropout(0.5, seed=SEED)(y)
+                y = layers.Dropout(0.5, seed=seed)(y)
             if self.is_residual:
                 feats.append(layers.Flatten()(y))
             x = y
 
         x = layers.Flatten()(x)
 
+        # One Dense Block(256) after the flatten, before the concatenation —
+        # NOT num_of_layer copies of it (that reused the conv-depth knob for
+        # dense depth, which the architecture diagram does not call for).
         if self.is_dense:
-            for _ in range(self.num_of_layer):
-                x = layers.Dense(
-                    256,
-                    kernel_regularizer=l2(1e-4),
-                    kernel_initializer=tf.keras.initializers.GlorotUniform(
-                        seed=SEED
-                    ),
-                )(x)
-                x = layers.Activation("relu")(x)
-            if self.is_dropout:
-                x = layers.Dropout(0.5, seed=SEED)(x)
+            x = layers.Dense(
+                256,
+                kernel_regularizer=l2(1e-4),
+                kernel_initializer=self._init(seed),
+            )(x)
+            x = layers.Activation("relu")(x)
 
         if self.is_residual:
-            output = layers.Concatenate(name="fcsnn_concat_feats")(feats + [x])
+            output = layers.Concatenate(name=f"{name}_concat_feats")(feats + [x])
         else:
             output = x
 
-        return Model(inputs, output, name="fcsnn_tower")
+        return Model(inputs, output, name=name)
+
+    def _fuse(self, feat_a: tf.Tensor, feat_b: tf.Tensor) -> tf.Tensor:
+        """Single conditional sequence over the three fusion modes."""
+        if self.fusion == "sub":
+            d = layers.Subtract(name="fcsnn_subtract")([feat_a, feat_b])
+            # Lambda wrapper: raw tf ops on symbolic tensors are rejected by Keras 3.
+            return layers.Lambda(lambda t: tf.abs(t), name="fcsnn_abs")(d)
+
+        if self.fusion == "concat":
+            return layers.Concatenate(name="fcsnn_concat")([feat_a, feat_b])
+
+        # mcmaf: treat the two embeddings as tokens and softmax-gate them.
+        tokens = layers.Lambda(
+            lambda t: tf.stack(t, axis=1), name="fcsnn_stack"
+        )([feat_a, feat_b])  # (B, 2, C)
+        scores = layers.Dense(1, kernel_initializer=self._init(self.seed))(tokens)
+        gates = layers.Softmax(axis=1, name="fcsnn_gates")(scores)
+        return layers.Lambda(
+            lambda t: tf.reduce_sum(t[0] * t[1], axis=1), name="fcsnn_gate_sum"
+        )([tokens, gates])
 
     def get_model(self) -> Model:
-        """
-        Build the full FCSNN model with two inputs (preDSM, postDSM) and a head.
-
-        Behavior:
-            - If ordinal=True → CORAL ordinal head (see models/ordinal.py)
-            - Elif n_class == 1 → Dense(1, sigmoid)  (binary)
-            - Elif n_class > 1 → Dense(n_class, softmax) (multi-class)
-        """
+        """Build the full FCSNN model with two inputs (preDSM, postDSM)."""
         img_a = layers.Input(self.input_shape, name="input_pre_dsm")
         img_b = layers.Input(self.input_shape, name="input_post_dsm")
 
         if self.shared:
-            tower = self.__build_siamese_model()
+            tower = self.__build_siamese_model(self.seed, "fcsnn_tower")
             feat_a = tower(img_a)
             feat_b = tower(img_b)
         else:
-            feat_a = self.__build_siamese_model()(img_a)
-            feat_b = self.__build_siamese_model()(img_b)
+            # Different seeds per tower: GlorotUniform(seed=s) is deterministic,
+            # so two towers built with the same seed would start out identical,
+            # which is not what "unshared weights" is supposed to mean.
+            feat_a = self.__build_siamese_model(self.seed, "fcsnn_tower_a")(img_a)
+            feat_b = self.__build_siamese_model(self.seed + 1, "fcsnn_tower_b")(img_b)
 
-        if self.substraction:
-            distance = layers.Subtract(name="fcsnn_subtract")([feat_a, feat_b])
-            # Lambda wrapper: raw tf ops on symbolic tensors are rejected by Keras 3.
-            distance = layers.Lambda(lambda t: tf.abs(t), name="fcsnn_abs")(distance)
-        else:
-            distance = layers.Concatenate(name="fcsnn_concat")([feat_a, feat_b])
-
-        # Optional MCMAF-style attention fusion over the two embedding vectors
-        # (treats feat_a and feat_b as tokens and computes softmax gates).
-        if self.fusion == "mcmaf":
-            # stack tokens: (B, 2, C)
-            tokens = layers.Lambda(lambda t: tf.stack(t, axis=1), name="fcsnn_stack")([feat_a, feat_b])
-            score_dense = layers.Dense(
-                1,
-                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
-            )
-            scores = score_dense(tokens)  # (B, 2, 1)
-            gates = layers.Softmax(axis=1, name="fcsnn_gates")(scores)
-            distance = layers.Lambda(
-                lambda t: tf.reduce_sum(t[0] * t[1], axis=1), name="fcsnn_gate_sum"
-            )([tokens, gates])
+        distance = self._fuse(feat_a, feat_b)
 
         if self.ordinal:
-            out = add_coral_head(distance, self.n_class, seed=SEED)
+            out = add_coral_head(distance, self.n_class, seed=self.seed)
         else:
-            if self.n_class == 1:
-                actv = "sigmoid"
-                units = 1
-            else:
-                actv = "softmax"
-                units = self.n_class
-
+            units, actv = (1, "sigmoid") if self.n_class == 1 else (self.n_class, "softmax")
             out = layers.Dense(
                 units,
                 activation=actv,
                 kernel_regularizer=l2(1e-4),
-                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+                kernel_initializer=self._init(self.seed),
                 name="output",
             )(distance)
 
-        model = Model(inputs=[img_a, img_b], outputs=out, name="FCSNN")
-        return model
+        return Model(inputs=[img_a, img_b], outputs=out, name="FCSNN")
 
 
 # ============================================================
@@ -210,9 +234,7 @@ class FCSNN:
 def load_dataset(
     npz_path: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Load dataset from NPZ file.
-    """
+    """Load dataset from NPZ file."""
     data = np.load(npz_path)
     return (
         data["X_train"],
@@ -222,11 +244,3 @@ def load_dataset(
         data["X_test"],
         data["Y_test"],
     )
-    # return (
-    #     data["train_X"],
-    #     data["train_Y"],
-    #     data["val_X"],
-    #     data["val_Y"],
-    #     data["test_X"],
-    #     data["test_Y"],
-    # )
