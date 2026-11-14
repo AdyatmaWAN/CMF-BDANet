@@ -23,9 +23,14 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report, fbeta_score
 
-from utils.metrics import compute_metrics
+from utils.metrics import compute_balanced_accuracy, compute_metrics
 
 SEED = 1234
+
+# The validation metric every selection in the protocol is made on. F2 weights
+# recall 4x precision: for damage assessment a missed damaged building costs
+# more than a false alarm. Ordinal runs (scenario 5) override this with QWK.
+MONITOR_METRIC = "val_f2"
 
 
 # ============================================================
@@ -245,7 +250,7 @@ def make_training_callbacks(
     min_delta: float = 1e-4,
     decode_pred_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     decode_true_fn: Callable[[np.ndarray], np.ndarray] | None = None,
-    monitor_name: str = "val_f1",
+    monitor_name: str = MONITOR_METRIC,
     monitor_fn: Callable[[np.ndarray, np.ndarray], float] | None = None,
 ):
     """Build the callback list every NN training run uses: a validation
@@ -259,8 +264,11 @@ def make_training_callbacks(
     reproduce the original threshold/argmax behavior.
 
     `monitor_name`/`monitor_fn` let a caller change *which* metric is
-    tracked (default: macro-F1, matching the historical "val_f1" behavior).
-    CORAL ordinal training monitors quadratic-weighted-kappa instead — see
+    tracked. The default is macro-F2 ("val_f2"): F2 weights recall four times
+    precision, which is the right bias for damage assessment, where a missed
+    damaged building costs more than a false alarm. (It was macro-F1 before;
+    `macro_f1` is still computed and saved, it just no longer drives
+    selection.) CORAL ordinal training monitors quadratic-weighted-kappa — see
     models/ordinal.py::ordinal_monitor_metric — since macro-F1 on decoded
     ranks doesn't reflect how far off a wrong ordinal prediction is.
     """
@@ -273,7 +281,7 @@ def make_training_callbacks(
         else np.argmax(np.asarray(p), axis=-1)
     )
     decode_true = decode_true_fn or (lambda y: np.asarray(y))
-    score_fn = monitor_fn or (lambda yt, yp: compute_metrics(yt, yp, num_classes)[3])  # macro_f1
+    score_fn = monitor_fn or (lambda yt, yp: compute_f2(yt, yp, num_classes))  # macro_f2
 
     def _collect_dataset_labels(dataset) -> np.ndarray:
         labels: List[np.ndarray] = []
@@ -363,7 +371,7 @@ def train_and_evaluate_nn(
     decode_true_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     class_probs_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     extra_metrics_fn: Callable[[np.ndarray, np.ndarray], Dict] | None = None,
-    monitor_name: str = "val_f1",
+    monitor_name: str = MONITOR_METRIC,
     monitor_fn: Callable[[np.ndarray, np.ndarray], float] | None = None,
     summary_log_fn: Callable[[Dict], str] | None = None,
 ) -> Dict:
@@ -391,10 +399,10 @@ def train_and_evaluate_nn(
         extra_metrics_fn - (y_true_int, y_pred_int) -> extra summary fields,
                            e.g. ordinal's {"mae": ..., "qwk": ..., ...}.
         monitor_name     - log key + callback `monitor=` value (default
-                           "val_f1"); paired with monitor_fn.
+                           "val_f2"); paired with monitor_fn.
         monitor_fn       - (y_true_int, y_pred_int) -> float score used for
                            checkpointing/early-stopping/LR-reduction inside
-                           make_training_callbacks (default: macro-F1).
+                           make_training_callbacks (default: macro-F2).
         summary_log_fn   - (summary_dict) -> str, the final console line
                            (default: "ACC=.. F1=.. MCC=..").
     """
@@ -431,6 +439,7 @@ def train_and_evaluate_nn(
 
     acc, prec, rec, f1, mcc, cm = compute_metrics(y_true, y_pred, num_classes)
     macro_f2 = compute_f2(y_true, y_pred, num_classes)
+    balanced_acc = compute_balanced_accuracy(y_true, y_pred)
 
     pred_df = build_predictions_frame(y_true, y_pred, to_class_probs(y_prob), num_classes, test_indices)
     predictions_csv = os.path.join(result_dir, "predictions.csv")
@@ -456,6 +465,7 @@ def train_and_evaluate_nn(
         "recall": rec,
         "macro_f1": f1,
         "macro_f2": macro_f2,
+        "balanced_accuracy": balanced_acc,
         "mcc": mcc,
         **(extra_metrics_fn(y_true, y_pred) if extra_metrics_fn else {}),
         "cm00": int(cm[0, 0]) if cm.shape == (2, 2) else 0,
@@ -473,7 +483,11 @@ def train_and_evaluate_nn(
     }
     pd.DataFrame([summary]).to_csv(os.path.join(result_dir, "metrics.csv"), index=False)
 
-    log_line = summary_log_fn(summary) if summary_log_fn else f"ACC={acc:.4f} F1={f1:.4f} MCC={mcc:.4f}"
+    log_line = (
+        summary_log_fn(summary)
+        if summary_log_fn
+        else f"ACC={acc:.4f} F1={f1:.4f} F2={macro_f2:.4f} BAcc={balanced_acc:.4f} MCC={mcc:.4f}"
+    )
     print(f"[{model_label}] {log_line}")
     return summary
 
@@ -555,7 +569,7 @@ def grid_search(
 # ============================================================
 
 
-def aggregate_scenarios_after_run(results_root: str, scenarios: Sequence[int], best_metric: str = "f1") -> None:
+def aggregate_scenarios_after_run(results_root: str, scenarios: Sequence[int], best_metric: str = "f2") -> None:
     """Call once at the end of a train_*.py script's main(): re-aggregate
     every scenario that was part of this run, across every model that has
     results there (not just the one that just trained), so
