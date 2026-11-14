@@ -48,7 +48,13 @@ from models.cmf_bdanet import POST_NDSM_IDX, POST_DENSITY_IDX, POST_UNC_IDX
 from models.ordinal import add_coral_head, encode_coral_labels
 
 SEED = 1234
-tf.random.set_seed(SEED)
+
+# ponytail: one module-level "seed currently being built with", set by
+# build_bddnet_model, rather than threading a seed argument through
+# conv_bn_relu / depthwise_separable / multiscale_* / stream_backbone /
+# fusion_stream. Model construction is single-threaded, so this is safe; if
+# BDD-Net ever gets built concurrently, thread the argument properly instead.
+_ACTIVE_SEED = SEED
 
 # Per-stage (base_filters multiplier, pool-after-this-stage) — 5 stages, 3 pools,
 # per "five multi-scale/residual convolution layers with three pooling layers"
@@ -62,8 +68,10 @@ _STAGE_POOL = (True, True, True, False, False)
 # ============================================================
 
 
-def _init(seed: int = SEED):
-    return tf.keras.initializers.GlorotUniform(seed=seed)
+def _init(seed: int | None = None):
+    return tf.keras.initializers.GlorotUniform(
+        seed=_ACTIVE_SEED if seed is None else seed
+    )
 
 
 def conv_bn_relu(x: tf.Tensor, filters: int, kernel_size: int, name_prefix: str, dilation_rate: int = 1) -> tf.Tensor:
@@ -189,6 +197,7 @@ def build_bddnet_model(
     base_filters: int = 16,
     fc_units: int = 1500,
     ordinal: bool = False,
+    seed: int = SEED,
 ) -> tf.keras.Model:
     """
     Build the BDD-Net model (Figure 5).
@@ -204,10 +213,14 @@ def build_bddnet_model(
         fc_units: Fully-connected layer width — 1500, per Section 3.1.
         ordinal: If True, replace the sigmoid/softmax head with a CORAL
             ordinal head (see models/ordinal.py). Requires num_classes >= 3.
+        seed: Seed for every initializer and dropout mask in this model.
 
     Returns:
         Keras Model named "BDD_Net" with inputs [optical_input, lidar_input].
     """
+    global _ACTIVE_SEED
+    _ACTIVE_SEED = seed
+
     optic_in = layers.Input(input_shape_optical, name="optical_input")
     lidar_in = layers.Input(input_shape_lidar, name="lidar_input")
 
@@ -223,10 +236,10 @@ def build_bddnet_model(
         ]
     )
     x = layers.Dense(fc_units, activation="relu", name="fc", kernel_initializer=_init())(merged)
-    x = layers.Dropout(0.5, name="fc_dropout", seed=SEED)(x)
+    x = layers.Dropout(0.5, name="fc_dropout", seed=seed)(x)
 
     if ordinal:
-        out = add_coral_head(x, num_classes, seed=SEED)
+        out = add_coral_head(x, num_classes, seed=seed)
     elif num_classes in (1, 2):
         out = layers.Dense(1, activation="sigmoid", name="output", kernel_initializer=_init())(x)
     else:
@@ -270,6 +283,7 @@ def make_dataset(
     include_unc: bool = True,
     ordinal: bool = False,
     num_classes: int | None = None,
+    seed: int = SEED,
 ) -> tf.data.Dataset:
     """Build tf.data.Dataset for BDD-Net training/evaluation, yielding
     ((optical, lidar), Y)."""
@@ -281,7 +295,7 @@ def make_dataset(
     optical, lidar = extract_inputs(X, include_density=include_density, include_unc=include_unc)
     ds = tf.data.Dataset.from_tensor_slices(((optical, lidar), Y))
     if shuffle:
-        ds = ds.shuffle(len(X), seed=SEED)
+        ds = ds.shuffle(len(X), seed=seed)
     ds = ds.batch(batch)
 
     try:
