@@ -44,6 +44,7 @@ NON_GROUP_COLUMNS = {
     "best_val_metric", "best_val_epoch", "monitor_metric",
     "train_time_sec", "num_test_samples",
     "result_dir", "predictions_csv", "selected_metric",
+    "seed", "balanced_accuracy", "params",
     # Ordinal-only metrics (see utils/metrics.py::compute_ordinal_metrics) -
     # present only on scenario-5 rows, always excluded from grouping either way.
     "mae", "rmse", "off_by_one_accuracy", "qwk", "linear_kappa", "spearman",
@@ -114,7 +115,7 @@ def collapse_best(df: pd.DataFrame, group_cols: list[str], score_col: str) -> pd
     return pd.concat(ranked_rows, ignore_index=True)
 
 
-def aggregate_metrics(results_root: Path, best_metric: str = "f1") -> pd.DataFrame:
+def aggregate_metrics(results_root: Path, best_metric: str = "f2") -> pd.DataFrame:
     """Stage 1: best HPO combo per (model, scenario, dataset, ablation-config)."""
     agg = load_all_metrics(results_root.resolve())
     if agg.empty:
@@ -129,7 +130,7 @@ def aggregate_metrics(results_root: Path, best_metric: str = "f1") -> pd.DataFra
     return _reorder(result, score_col)
 
 
-def select_best_overall(per_ablation_best: pd.DataFrame, best_metric: str = "f1") -> pd.DataFrame:
+def select_best_overall(per_ablation_best: pd.DataFrame, best_metric: str = "f2") -> pd.DataFrame:
     """Stage 2: collapse the stage-1 table further across every model, down
     to the single best row per scenario (+ dataset).
     """
@@ -170,7 +171,7 @@ def _write(df: pd.DataFrame, out_csv: Path, out_xlsx: Path) -> None:
         print(f"Wrote {out_csv} (failed to write {out_xlsx}: {e})")
 
 
-def aggregate_and_write(results_root: Path, best_metric: str = "f1") -> tuple[pd.DataFrame, pd.DataFrame]:
+def aggregate_and_write(results_root: Path, best_metric: str = "f2") -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run both aggregation stages over everything under `results_root` and
     write their CSV/XLSX outputs directly under it (`aggregated_metrics.*`,
     `best_overall.*`). This is the single entrypoint both the CLI below and
@@ -203,7 +204,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", type=str, default="results", help="Path to results root")
     parser.add_argument(
-        "--best-metric", type=str, default="f1", choices=("f1", "f2"),
+        "--best-metric", type=str, default="f2", choices=("f1", "f2"),
         help="Metric used to rank hyperparameter combos and, in stage 2, models.",
     )
     args = parser.parse_args()
