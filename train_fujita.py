@@ -154,6 +154,7 @@ def train_one(
             "dataset": dataset_name,
             "dsm_mode_tag": dsm_mode,
             "batch_size": batch_size,
+            "params": int(model.count_params()),
             "seed": seed,
         },
     )

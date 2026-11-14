@@ -196,6 +196,7 @@ def train_one(
             "residual": residual,
             "fusion": fusion,
             "batch_size": batch_size,
+            "params": int(model.count_params()),
             "seed": seed,
         },
     )

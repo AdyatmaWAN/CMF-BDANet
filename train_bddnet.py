@@ -170,6 +170,7 @@ def train_one(
             "dsm_mode_tag": dsm_mode,
             "base_filters": base_filters,
             "batch_size": batch_size,
+            "params": int(model.count_params()),
             "seed": seed,
         },
     )
