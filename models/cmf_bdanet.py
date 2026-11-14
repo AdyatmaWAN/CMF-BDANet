@@ -35,7 +35,12 @@ from tensorflow.keras import layers, models
 from models.ordinal import add_coral_head, encode_coral_labels
 
 SEED = 1234
-tf.random.set_seed(SEED)
+
+# Fusion modes, same vocabulary as models/fcsnn.py:
+#   "sub"    -> |dsm_token - rgb_token| per level (projected to token_dim first)
+#   "concat" -> concatenation of pooled DSM and RGB tokens across levels
+#   "mcmaf"  -> multi-level cross-modal attention fusion (MCMAFFusion)
+FUSIONS = ("sub", "concat", "mcmaf")
 
 # Fused NPZ channel map (see dataset builder/pipeline)
 PRE_NDSM_IDX = 6
@@ -55,6 +60,7 @@ def bdd_conv_block(
     x: tf.Tensor,
     filters: int,
     name_prefix: str,
+    seed: int = SEED,
 ) -> tf.Tensor:
     """
     Basic convolutional block used in BDDNet-style backbones.
@@ -72,7 +78,7 @@ def bdd_conv_block(
         padding="same",
         use_bias=False,
         name=f"{name_prefix}_conv1",
-        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
     )(x)
     x = layers.BatchNormalization(name=f"{name_prefix}_bn1")(x)
     x = layers.ReLU(name=f"{name_prefix}_relu1")(x)
@@ -83,7 +89,7 @@ def bdd_conv_block(
         padding="same",
         use_bias=False,
         name=f"{name_prefix}_conv2",
-        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
     )(x)
     x = layers.BatchNormalization(name=f"{name_prefix}_bn2")(x)
     x = layers.ReLU(name=f"{name_prefix}_relu2")(x)
@@ -94,13 +100,13 @@ def bdd_conv_block(
         padding="same",
         use_bias=False,
         name=f"{name_prefix}_conv3",
-        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
     )(x)
     x = layers.BatchNormalization(name=f"{name_prefix}_bn3")(x)
     x = layers.ReLU(name=f"{name_prefix}_relu3")(x)
 
     x = layers.MaxPooling2D(2, name=f"{name_prefix}_pool")(x)
-    x = layers.Dropout(0.5, name=f"{name_prefix}_dropout", seed=SEED)(x)
+    x = layers.Dropout(0.5, name=f"{name_prefix}_dropout", seed=seed)(x)
     return x
 
 
@@ -108,6 +114,7 @@ def encoder_backbone(
     x: tf.Tensor,
     base_filters: int = 32,
     name_prefix: str = "enc",
+    seed: int = SEED,
 ) -> List[tf.Tensor]:
     """
     Simple 3-level encoder returning multi-scale feature maps.
@@ -122,13 +129,13 @@ def encoder_backbone(
     """
     feats: List[tf.Tensor] = []
 
-    x = bdd_conv_block(x, base_filters, f"{name_prefix}_l1")
+    x = bdd_conv_block(x, base_filters, f"{name_prefix}_l1", seed=seed)
     feats.append(x)
 
-    x = bdd_conv_block(x, base_filters * 2, f"{name_prefix}_l2")
+    x = bdd_conv_block(x, base_filters * 2, f"{name_prefix}_l2", seed=seed)
     feats.append(x)
 
-    x = bdd_conv_block(x, base_filters * 4, f"{name_prefix}_l3")
+    x = bdd_conv_block(x, base_filters * 4, f"{name_prefix}_l3", seed=seed)
     feats.append(x)
 
     return feats
@@ -147,16 +154,24 @@ class MCMAFFusion(layers.Layer):
     Output is concatenation of fused tokens across all levels.
     """
 
-    def __init__(self, token_dim: int = 128, num_levels: int = 3, name: str = "MCMAF"):
-        super().__init__(name=name)
+    def __init__(
+        self,
+        token_dim: int = 128,
+        num_levels: int = 3,
+        name: str = "MCMAF",
+        seed: int = SEED,
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
         self.num_levels = num_levels
         self.token_dim = token_dim
+        self.seed = seed
 
         self.conv_dsm: List[layers.Conv2D] = [
             layers.Conv2D(
                 token_dim,
                 1,
-                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
             )
             for _ in range(num_levels)
         ]
@@ -164,7 +179,7 @@ class MCMAFFusion(layers.Layer):
             layers.Conv2D(
                 token_dim,
                 1,
-                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+                kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
             )
             for _ in range(num_levels)
         ]
@@ -172,8 +187,19 @@ class MCMAFFusion(layers.Layer):
         self.gap = layers.GlobalAveragePooling2D()
         self.score_dense = layers.Dense(
             1,
-            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
         )
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "token_dim": self.token_dim,
+                "num_levels": self.num_levels,
+                "seed": self.seed,
+            }
+        )
+        return config
 
     def call(
         self,
@@ -221,6 +247,7 @@ def build_cmf_bdanet_conv(
     residual: bool = True,
     fusion: str = "mcmaf",
     ordinal: bool = False,
+    seed: int = SEED,
 ) -> tf.keras.Model:
     """
     Build CMF-BDANet model using convolutional encoders.
@@ -256,7 +283,7 @@ def build_cmf_bdanet_conv(
 
     # DSM Siamese encoder
     dsm_in = layers.Input(input_shape_dsm, name="dsm_encoder_input")
-    dsm_feats = encoder_backbone(dsm_in, base_filters=base_filters, name_prefix="dsm")
+    dsm_feats = encoder_backbone(dsm_in, base_filters=base_filters, name_prefix="dsm", seed=seed)
     dsm_encoder = models.Model(dsm_in, dsm_feats, name="dsm_encoder")
 
     f_pre = dsm_encoder(inp_pre)
@@ -277,7 +304,7 @@ def build_cmf_bdanet_conv(
     if four_stream:
         # Build RGB siamese encoder (shared weights between pre/post RGB)
         rgb_in = layers.Input(input_shape_rgb, name="rgb_encoder_input")
-        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb")
+        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb", seed=seed)
         rgb_encoder = models.Model(rgb_in, rgb_feats, name="rgb_encoder")
 
         f_rgb_pre = rgb_encoder(inp_rgb_pre)
@@ -296,7 +323,7 @@ def build_cmf_bdanet_conv(
         else:
             rgbd = inp_rgb
         rgb_in = layers.Input(rgbd.shape[1:], name="rgb_encoder_input")
-        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb")
+        rgb_feats = encoder_backbone(rgb_in, base_filters=base_filters, name_prefix="rgb", seed=seed)
         rgb_encoder = models.Model(rgb_in, rgb_feats, name="rgb_encoder")
         f_rgb = rgb_encoder(rgbd)
 
@@ -305,12 +332,12 @@ def build_cmf_bdanet_conv(
     # global-pooled concatenation of tokens). Default preserves previous
     # behaviour ('mcmaf'). The 'residual' flag controls how many levels are
     # considered for mcmaf (3) vs 1 when not residual.
-    if fusion not in ("mcmaf", "concat"):
-        raise ValueError("fusion must be 'mcmaf' or 'concat'")
+    if fusion not in FUSIONS:
+        raise ValueError(f"fusion must be one of {FUSIONS}, got {fusion!r}")
 
     if fusion == "mcmaf":
         num_levels = 1 if not residual else 3
-        fusion_layer = MCMAFFusion(token_dim=token_dim, num_levels=num_levels)
+        fusion_layer = MCMAFFusion(token_dim=token_dim, num_levels=num_levels, seed=seed)
         if four_stream:
             if not residual:
                 # When not residual=True, rgb_change is a single tensor, wrap it in a list
@@ -323,46 +350,73 @@ def build_cmf_bdanet_conv(
                 z, gates_all = fusion_layer(([dsm_change[-1]], [f_rgb[-1]]))
             else:
                 z, gates_all = fusion_layer((dsm_change, f_rgb))
-    else:  # concat
-        # Convert per-level feature maps to tokens via global average pool and
-        # then concatenate DSM and RGB tokens across levels/modalities.
+    else:  # 'concat' or 'sub'
+        # Convert per-level feature maps to tokens via global average pool.
         gap = layers.GlobalAveragePooling2D()
-        d_tokens = [gap(t) for t in dsm_change]
+        d_raw = dsm_change
         if four_stream:
-            r_tokens = [gap(t) for t in rgb_change]
+            r_raw = rgb_change
+        elif isinstance(f_rgb, list):
+            r_raw = f_rgb
         else:
-            # f_rgb might be a list of level tensors or a single tensor
-            if isinstance(f_rgb, list):
-                r_tokens = [gap(t) for t in f_rgb]
-            else:
-                r_tokens = [gap(f_rgb)]
+            r_raw = [f_rgb]
 
-        z = layers.Concatenate(name="fusion_concat_tokens")(d_tokens + r_tokens)
+        if fusion == "sub":
+            # Absolute difference between the two modalities. DSM and RGB
+            # feature maps have different channel counts, so project both to
+            # token_dim first (the same 1x1 projection MCMAF uses) and take
+            # |dsm - rgb| per level.
+            levels = min(len(d_raw), len(r_raw))
+            sub_tokens = []
+            for i in range(levels):
+                pd = layers.Conv2D(
+                    token_dim, 1, name=f"sub_proj_dsm_l{i + 1}",
+                    kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
+                )(d_raw[i])
+                pr = layers.Conv2D(
+                    token_dim, 1, name=f"sub_proj_rgb_l{i + 1}",
+                    kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
+                )(r_raw[i])
+                diff = layers.Subtract(name=f"sub_diff_l{i + 1}")([gap(pd), gap(pr)])
+                sub_tokens.append(
+                    layers.Lambda(lambda t: tf.abs(t), name=f"sub_abs_l{i + 1}")(diff)
+                )
+            z = (
+                sub_tokens[0]
+                if len(sub_tokens) == 1
+                else layers.Concatenate(name="fusion_sub_tokens")(sub_tokens)
+            )
+
+        else:  # concat
+            d_tokens = [gap(t) for t in d_raw]
+            r_tokens = [gap(t) for t in r_raw]
+
+            z = layers.Concatenate(name="fusion_concat_tokens")(d_tokens + r_tokens)
 
     # Classifier
     x = layers.Dense(
         256,
         activation="relu",
         name="cls_fc",
-        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+        kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
     )(z)
-    x = layers.Dropout(0.5, name="cls_dropout", seed=SEED)(x)
+    x = layers.Dropout(0.5, name="cls_dropout", seed=seed)(x)
 
     if ordinal:
-        out = add_coral_head(x, num_classes, seed=SEED)
+        out = add_coral_head(x, num_classes, seed=seed)
     elif num_classes == 1:
         out = layers.Dense(
             1,
             activation="sigmoid",
             name="output",
-            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
         )(x)
     else:
         out = layers.Dense(
             num_classes,
             activation="softmax",
             name="output",
-            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=SEED),
+            kernel_initializer=tf.keras.initializers.GlorotUniform(seed=seed),
         )(x)
 
     if four_stream:
@@ -444,6 +498,7 @@ def make_dataset(
     four_stream: bool = False,
     ordinal: bool = False,
     num_classes: int | None = None,
+    seed: int = SEED,
 ) -> tf.data.Dataset:
     """
     Build tf.data.Dataset for CMF-BDANet training/evaluation.
@@ -481,7 +536,7 @@ def make_dataset(
         )
         ds = tf.data.Dataset.from_tensor_slices(((dsm_pre, dsm_post, rgb), Y))
     if shuffle:
-        ds = ds.shuffle(len(X), seed=SEED)
+        ds = ds.shuffle(len(X), seed=seed)
     ds = ds.batch(batch)
 
     # Limit prefetch and private threadpool size to avoid too many threads
