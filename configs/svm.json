@@ -1,13 +1,13 @@
 {
   "models": ["Moya", "Hajeb"],
   "results_root": "results",
-  "seed": 1234,
+  "seeds": [12345, 23451, 34512, 45123, 51234],
   "scenarios": [1, 2, 3, 4],
   "datasets": {
-    "dataset_16": "Dataset/NPZ/dataset_16.npz"
+    "dataset_16": "Dataset/NPZ_spatial/dataset_16.npz"
   },
   "ablation_grid": {
-    "dsm_mode": ["dsm_density_uncertainty", "dsm_density", "dsm_uncertainty", "dsm_only"]
+    "dsm_mode": ["dsm_only"]
   },
   "hpo_grid": {
     "kernel": ["rbf", "linear"],
