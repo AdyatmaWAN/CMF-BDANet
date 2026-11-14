@@ -37,6 +37,7 @@ import pandas as pd  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
+    MONITOR_METRIC,
     aggregate_scenarios_after_run,
     dsm_mode_channels,
     grid_search,
@@ -44,7 +45,7 @@ from utils.experiment import (  # noqa: E402
     set_tf_determinism,
     train_and_evaluate_nn,
 )
-from models.fcsnn import FCSNN, load_dataset  # noqa: E402
+from models.fcsnn import FCSNN, FUSIONS, load_dataset  # noqa: E402
 from models.cmf_bdanet import resolve_dsm_channel_indices  # noqa: E402
 from models.ordinal import (  # noqa: E402
     coral_probs_to_class_probs,
@@ -65,22 +66,34 @@ def build_result_dir(
     dataset_name: str,
     *,
     dsm_mode: str,
-    residual: bool,
     fusion: str,
+    shared: bool,
+    dropout: bool,
+    dense: bool,
+    base_filters: int,
     optimizer: str,
     learning_rate: float,
     batch_size: int,
+    seed: int,
     **_ignored,
 ) -> str:
+    """One layout shared by every stage (HPO / ablation / multi-seed), so a run
+    trained in one stage is found and skipped by the next — see
+    utils/experiment.py::is_already_trained.
+    """
     return os.path.join(
         results_root,
         f"scenario_{scenario}",
         "FCSNN",
         dataset_name,
         dsm_mode,
-        f"residual_{residual}",
         f"fusion_{fusion}",
+        f"shared_{shared}",
+        f"bf{base_filters}",
+        f"do_{dropout}",
+        f"dense_{dense}",
         f"{optimizer}_lr{learning_rate}_bs{batch_size}",
+        f"seed_{seed}",
     )
 
 
@@ -88,25 +101,31 @@ def train_one(
     *,
     result_dir: str,
     dsm_mode: str,
-    residual: bool,
     fusion: str,
+    shared: bool,
+    dropout: bool,
+    dense: bool,
+    base_filters: int,
     optimizer: str,
     learning_rate: float,
     batch_size: int,
+    seed: int,
     scenario: int,
     dataset_name: str,
     num_classes: int,
-    seed: int,
     epochs: int,
     callback_cfg: Dict,
-    X_train, Y_train, X_val, Y_val, X_test, Y_test, test_indices,
+    residual: bool = True,
+    X_train=None, Y_train=None, X_val=None, Y_val=None, X_test=None, Y_test=None,
+    test_indices=None,
 ) -> Dict:
     include_density, include_unc = dsm_mode_channels(dsm_mode)
     ordinal = is_ordinal_scenario(scenario)
 
     print(
         f"\n===== [FCSNN] scenario={scenario} dataset={dataset_name} dsm={dsm_mode} "
-        f"residual={residual} fusion={fusion} opt={optimizer} lr={learning_rate} bs={batch_size} "
+        f"fusion={fusion} shared={shared} do={dropout} dense={dense} bf={base_filters} "
+        f"opt={optimizer} lr={learning_rate} bs={batch_size} seed={seed} "
         f"ordinal={ordinal} ====="
     )
 
@@ -130,14 +149,15 @@ def train_one(
     model = FCSNN(
         num_of_class=num_classes,
         residual=residual,
-        dropout=True,
-        dense=True,
+        dropout=dropout,
+        dense=dense,
         num_of_layer=3,
         input_shape=(H, W, dsm_channels),
-        substraction=True,
-        shared=True,
+        shared=shared,
         fusion=fusion,
         ordinal=ordinal,
+        base_filters=base_filters,
+        seed=seed,
     ).get_model()
 
     return train_and_evaluate_nn(
@@ -158,7 +178,7 @@ def train_one(
         decode_true_fn=decode_coral_true_labels if ordinal else None,
         class_probs_fn=coral_probs_to_class_probs if ordinal else None,
         extra_metrics_fn=ordinal_extra_metrics if ordinal else None,
-        monitor_name="val_qwk" if ordinal else "val_f1",
+        monitor_name="val_qwk" if ordinal else MONITOR_METRIC,
         monitor_fn=ordinal_monitor_metric if ordinal else None,
         summary_log_fn=ordinal_summary_log if ordinal else None,
         extra_summary={
@@ -168,7 +188,13 @@ def train_one(
             "dsm_mode_tag": dsm_mode,
             "residual": residual,
             "fusion": fusion,
+            "shared": shared,
+            "dropout": dropout,
+            "dense": dense,
+            "base_filters": base_filters,
+            "params": int(model.count_params()),
             "batch_size": batch_size,
+            "seed": seed,
         },
     )
 
@@ -178,8 +204,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="configs/fcsnn.json")
     parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
-    parser.add_argument("--residual", type=str, default=None, choices=["true", "false"])
-    parser.add_argument("--fusion", type=str, default=None, choices=["concat", "mcmaf"])
+    parser.add_argument("--fusion", type=str, default=None, choices=list(FUSIONS))
+    parser.add_argument("--shared", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--dropout", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--dense", type=str, default=None, choices=["true", "false"])
+    parser.add_argument("--base-filters", type=int, default=None)
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Train a single seed instead of every seed in the config.",
+    )
     return parser.parse_args()
 
 
@@ -189,17 +222,28 @@ def main() -> None:
         config = json.load(f)
 
     results_root = config["results_root"]
-    seed = config.get("seed", 1234)
     epochs = config["epochs"]
     callback_cfg = config.get("callbacks", {})
     scenarios = [args.scenario] if args.scenario is not None else config["scenarios"]
     ablation_grid = dict(config["ablation_grid"])
     if args.dsm_mode is not None:
         ablation_grid["dsm_mode"] = [args.dsm_mode]
-    if args.residual is not None:
-        ablation_grid["residual"] = [args.residual == "true"]
     if args.fusion is not None:
         ablation_grid["fusion"] = [args.fusion]
+    if args.shared is not None:
+        ablation_grid["shared"] = [args.shared == "true"]
+    if args.dropout is not None:
+        ablation_grid["dropout"] = [args.dropout == "true"]
+    if args.dense is not None:
+        ablation_grid["dense"] = [args.dense == "true"]
+    if args.base_filters is not None:
+        ablation_grid["base_filters"] = [args.base_filters]
+
+    # `seed` rides in the HPO grid so grid_search iterates it like any other
+    # parameter, and build_result_dir puts it in the path — that is what makes
+    # a 5-seed run five distinct, independently resumable runs.
+    hpo_grid = dict(config["hpo_grid"])
+    hpo_grid["seed"] = [args.seed] if args.seed is not None else config["seeds"]
 
     all_results = []
     for scenario in scenarios:
@@ -217,14 +261,13 @@ def main() -> None:
 
             results = grid_search(
                 ablation_grid=ablation_grid,
-                hpo_grid=config["hpo_grid"],
+                hpo_grid=hpo_grid,
                 result_dir_fn=functools.partial(build_result_dir, results_root, scenario, dataset_name),
                 train_one_fn=functools.partial(
                     train_one,
                     scenario=scenario,
                     dataset_name=dataset_name,
                     num_classes=num_classes,
-                    seed=seed,
                     epochs=epochs,
                     callback_cfg=callback_cfg,
                     X_train=X_train, Y_train=Y_train,

@@ -38,6 +38,7 @@ import pandas as pd  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
+    MONITOR_METRIC,
     aggregate_scenarios_after_run,
     dsm_mode_channels,
     grid_search,
@@ -88,6 +89,7 @@ def build_result_dir(
     optimizer: str,
     learning_rate: float,
     batch_size: int,
+    seed: int,
     **_ignored,
 ) -> str:
     return os.path.join(
@@ -100,6 +102,7 @@ def build_result_dir(
         f"residual_{residual}",
         f"fusion_{fusion}",
         f"{optimizer}_lr{learning_rate}_bs{batch_size}",
+        f"seed_{seed}",
     )
 
 
@@ -133,15 +136,15 @@ def train_one(
 
     train_ds = make_cmf_dataset(
         X_train, Y_train, batch_size, True, include_density, include_unc, four_stream,
-        ordinal=ordinal, num_classes=num_classes,
+        ordinal=ordinal, num_classes=num_classes, seed=seed,
     )
     val_ds = make_cmf_dataset(
         X_val, Y_val, batch_size, False, include_density, include_unc, four_stream,
-        ordinal=ordinal, num_classes=num_classes,
+        ordinal=ordinal, num_classes=num_classes, seed=seed,
     )
     test_ds = make_cmf_dataset(
         X_test, Y_test, batch_size, False, include_density, include_unc, four_stream,
-        ordinal=ordinal, num_classes=num_classes,
+        ordinal=ordinal, num_classes=num_classes, seed=seed,
     )
 
     H, W = X_train.shape[1], X_train.shape[2]
@@ -158,6 +161,7 @@ def train_one(
         residual=residual,
         fusion=fusion,
         ordinal=ordinal,
+        seed=seed,
     )
 
     return train_and_evaluate_nn(
@@ -178,7 +182,7 @@ def train_one(
         decode_true_fn=decode_coral_true_labels if ordinal else None,
         class_probs_fn=coral_probs_to_class_probs if ordinal else None,
         extra_metrics_fn=ordinal_extra_metrics if ordinal else None,
-        monitor_name="val_qwk" if ordinal else "val_f1",
+        monitor_name="val_qwk" if ordinal else MONITOR_METRIC,
         monitor_fn=ordinal_monitor_metric if ordinal else None,
         summary_log_fn=ordinal_summary_log if ordinal else None,
         extra_summary={
@@ -192,6 +196,7 @@ def train_one(
             "residual": residual,
             "fusion": fusion,
             "batch_size": batch_size,
+            "seed": seed,
         },
     )
 
@@ -204,6 +209,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", type=str, default=None, choices=VARIANTS)
     parser.add_argument("--residual", type=str, default=None, choices=["true", "false"])
     parser.add_argument("--fusion", type=str, default=None, choices=["concat", "mcmaf"])
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Train a single seed instead of every seed in the config.",
+    )
     return parser.parse_args()
 
 
@@ -213,7 +222,10 @@ def main() -> None:
         config = json.load(f)
 
     results_root = config["results_root"]
-    seed = config.get("seed", 1234)
+    # `seed` rides in the HPO grid so grid_search iterates it like any other
+    # parameter, and build_result_dir puts it in the path.
+    hpo_grid = dict(config["hpo_grid"])
+    hpo_grid["seed"] = [args.seed] if args.seed is not None else config["seeds"]
     epochs = config["epochs"]
     callback_cfg = config.get("callbacks", {})
     scenarios = [args.scenario] if args.scenario is not None else config["scenarios"]
@@ -243,14 +255,13 @@ def main() -> None:
 
             results = grid_search(
                 ablation_grid=ablation_grid,
-                hpo_grid=config["hpo_grid"],
+                hpo_grid=hpo_grid,
                 result_dir_fn=functools.partial(build_result_dir, results_root, scenario, dataset_name),
                 train_one_fn=functools.partial(
                     train_one,
                     scenario=scenario,
                     dataset_name=dataset_name,
                     num_classes=num_classes,
-                    seed=seed,
                     epochs=epochs,
                     callback_cfg=callback_cfg,
                     X_train=X_train, Y_train=Y_train,

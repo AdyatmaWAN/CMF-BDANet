@@ -38,6 +38,7 @@ import pandas as pd  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
+    MONITOR_METRIC,
     aggregate_scenarios_after_run,
     dsm_mode_channels,
     grid_search,
@@ -75,6 +76,7 @@ def build_result_dir(
     optimizer: str,
     learning_rate: float,
     batch_size: int,
+    seed: int,
     **_ignored,
 ) -> str:
     return os.path.join(
@@ -85,6 +87,7 @@ def build_result_dir(
         dsm_mode,
         f"base_filters_{base_filters}",
         f"{optimizer}_lr{learning_rate}_bs{batch_size}",
+        f"seed_{seed}",
     )
 
 
@@ -115,15 +118,15 @@ def train_one(
 
     train_ds = make_bddnet_dataset(
         X_train, Y_train, batch_size, True, include_density, include_unc,
-        ordinal=ordinal, num_classes=num_classes,
+        ordinal=ordinal, num_classes=num_classes, seed=seed,
     )
     val_ds = make_bddnet_dataset(
         X_val, Y_val, batch_size, False, include_density, include_unc,
-        ordinal=ordinal, num_classes=num_classes,
+        ordinal=ordinal, num_classes=num_classes, seed=seed,
     )
     test_ds = make_bddnet_dataset(
         X_test, Y_test, batch_size, False, include_density, include_unc,
-        ordinal=ordinal, num_classes=num_classes,
+        ordinal=ordinal, num_classes=num_classes, seed=seed,
     )
 
     H, W = X_train.shape[1], X_train.shape[2]
@@ -136,6 +139,7 @@ def train_one(
         num_classes=num_classes,
         base_filters=base_filters,
         ordinal=ordinal,
+        seed=seed,
     )
 
     return train_and_evaluate_nn(
@@ -156,7 +160,7 @@ def train_one(
         decode_true_fn=decode_coral_true_labels if ordinal else None,
         class_probs_fn=coral_probs_to_class_probs if ordinal else None,
         extra_metrics_fn=ordinal_extra_metrics if ordinal else None,
-        monitor_name="val_qwk" if ordinal else "val_f1",
+        monitor_name="val_qwk" if ordinal else MONITOR_METRIC,
         monitor_fn=ordinal_monitor_metric if ordinal else None,
         summary_log_fn=ordinal_summary_log if ordinal else None,
         extra_summary={
@@ -166,6 +170,7 @@ def train_one(
             "dsm_mode_tag": dsm_mode,
             "base_filters": base_filters,
             "batch_size": batch_size,
+            "seed": seed,
         },
     )
 
@@ -176,6 +181,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
     parser.add_argument("--base-filters", type=int, default=None, choices=BASE_FILTERS_CHOICES)
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Train a single seed instead of every seed in the config.",
+    )
     return parser.parse_args()
 
 
@@ -185,7 +194,10 @@ def main() -> None:
         config = json.load(f)
 
     results_root = config["results_root"]
-    seed = config.get("seed", 1234)
+    # `seed` rides in the HPO grid so grid_search iterates it like any other
+    # parameter, and build_result_dir puts it in the path.
+    hpo_grid = dict(config["hpo_grid"])
+    hpo_grid["seed"] = [args.seed] if args.seed is not None else config["seeds"]
     epochs = config["epochs"]
     callback_cfg = config.get("callbacks", {})
     scenarios = [args.scenario] if args.scenario is not None else config["scenarios"]
@@ -211,14 +223,13 @@ def main() -> None:
 
             results = grid_search(
                 ablation_grid=ablation_grid,
-                hpo_grid=config["hpo_grid"],
+                hpo_grid=hpo_grid,
                 result_dir_fn=functools.partial(build_result_dir, results_root, scenario, dataset_name),
                 train_one_fn=functools.partial(
                     train_one,
                     scenario=scenario,
                     dataset_name=dataset_name,
                     num_classes=num_classes,
-                    seed=seed,
                     epochs=epochs,
                     callback_cfg=callback_cfg,
                     X_train=X_train, Y_train=Y_train,

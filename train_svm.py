@@ -34,7 +34,6 @@ from utils.experiment import set_global_determinism
 set_global_determinism()
 
 from sklearn.svm import SVC  # noqa: E402
-from sklearn.utils import class_weight  # noqa: E402
 
 from utils.experiment import (  # noqa: E402
     DSM_MODES,
@@ -50,7 +49,7 @@ from models import Hajeb as hajeb_module  # noqa: E402
 from models.fcsnn import load_dataset  # noqa: E402
 from models.cmf_bdanet import extract_inputs  # noqa: E402
 from utils.label_processing import prepare_split_with_indices  # noqa: E402
-from utils.metrics import compute_metrics  # noqa: E402
+from utils.metrics import compute_balanced_accuracy, compute_metrics  # noqa: E402
 
 FEATURE_FUNCS = {
     "Moya": moya_module.feature_difference,
@@ -81,6 +80,7 @@ def build_result_dir(
     decision_function: str,
     C,
     gamma,
+    seed: int,
     **_ignored,
 ) -> str:
     return os.path.join(
@@ -90,6 +90,7 @@ def build_result_dir(
         dataset_name,
         dsm_mode,
         f"dec_{decision_function}_kernel_{kernel}_C_{C}_gamma_{gamma}",
+        f"seed_{seed}",
     )
 
 
@@ -101,12 +102,15 @@ def train_one(
     decision_function: str,
     C,
     gamma,
+    seed: int,
     scenario: int,
     dataset_name: str,
     model_name: str,
     num_classes: int,
     feat_train: np.ndarray,
     Y_train: np.ndarray,
+    feat_val: np.ndarray,
+    Y_val: np.ndarray,
     feat_test: np.ndarray,
     Y_test: np.ndarray,
     test_indices: np.ndarray,
@@ -115,24 +119,29 @@ def train_one(
 
     print(
         f"\n===== [{model_name}] scenario={scenario} dataset={dataset_name} dsm={dsm_mode} "
-        f"dec={decision_function} kernel={kernel} C={C} gamma={gamma} ====="
+        f"dec={decision_function} kernel={kernel} C={C} gamma={gamma} seed={seed} ====="
     )
-
-    weight = class_weight.compute_class_weight(
-        class_weight="balanced", classes=np.unique(Y_train), y=Y_train
-    )
-    d_class_weights = dict(enumerate(weight))
 
     t0 = time.time()
+    # No class weighting anywhere in this protocol — see docs/EXPERIMENT_PLAN.md.
+    # `random_state` is the only randomisation here; SVC is otherwise a
+    # deterministic function of (training set, hyperparameters), so seeds are
+    # expected to produce identical runs. That is reported as-is rather than
+    # manufacturing spread.
     clf = SVC(
         decision_function_shape=decision_function,
         kernel=kernel,
         C=C,
         gamma=gamma,
-        class_weight=d_class_weights,
+        random_state=seed,
     )
     clf.fit(feat_train, Y_train)
     train_time = time.time() - t0
+
+    # Validation score: what Stages 0-1 select on, the same macro-F2 the NNs
+    # monitor. The test split below is only read for the final report.
+    val_pred = clf.predict(feat_val)
+    best_val_metric = compute_f2(np.asarray(Y_val).astype(int), np.asarray(val_pred).astype(int), num_classes)
 
     y_pred = clf.predict(feat_test)
 
@@ -175,13 +184,17 @@ def train_one(
         "decision_function": decision_function,
         "C": C,
         "gamma": gamma,
+        "seed": seed,
         "num_classes": num_classes,
         "accuracy": acc,
         "precision": prec,
         "recall": rec,
         "macro_f1": f1,
         "macro_f2": macro_f2,
+        "balanced_accuracy": compute_balanced_accuracy(y_true, y_pred),
         "mcc": mcc,
+        "best_val_metric": best_val_metric,
+        "monitor_metric": "val_f2",
         "cm00": int(cm[0, 0]) if cm.shape == (2, 2) else 0,
         "cm01": int(cm[0, 1]) if cm.shape == (2, 2) else 0,
         "cm10": int(cm[1, 0]) if cm.shape == (2, 2) else 0,
@@ -194,7 +207,10 @@ def train_one(
     }
     pd.DataFrame([summary]).to_csv(os.path.join(result_dir, "metrics.csv"), index=False)
 
-    print(f"[{model_name}] scenario={scenario} ACC={acc:.4f} F1={f1:.4f} MCC={mcc:.4f}")
+    print(
+        f"[{model_name}] scenario={scenario} val_f2={best_val_metric:.4f} "
+        f"ACC={acc:.4f} F1={f1:.4f} F2={macro_f2:.4f} MCC={mcc:.4f}"
+    )
     return summary
 
 
@@ -204,6 +220,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", type=int, default=None, choices=[1, 2, 3, 4])
     parser.add_argument("--dsm-mode", type=str, default=None, choices=[m["key"] for m in DSM_MODES])
     parser.add_argument("--model", type=str, default=None, choices=["Moya", "Hajeb"])
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Train a single seed instead of every seed in the config.",
+    )
     return parser.parse_args()
 
 
@@ -219,6 +239,9 @@ def main() -> None:
     if args.dsm_mode is not None:
         ablation_grid["dsm_mode"] = [args.dsm_mode]
 
+    hpo_grid = dict(config["hpo_grid"])
+    hpo_grid["seed"] = [args.seed] if args.seed is not None else config["seeds"]
+
     all_results = []
     for scenario in scenarios:
         for dataset_name, npz_path in config["datasets"].items():
@@ -230,6 +253,7 @@ def main() -> None:
             ) = load_dataset(npz_path)
 
             X_train, Y_train, _, num_classes, _ = prepare_split_with_indices(X_train_raw, Y_train_raw, scenario)
+            X_val, Y_val, _, _, _ = prepare_split_with_indices(X_val_raw, Y_val_raw, scenario)
             X_test, Y_test, test_indices, _, _ = prepare_split_with_indices(X_test_raw, Y_test_raw, scenario)
 
             for model_name in model_names:
@@ -240,10 +264,14 @@ def main() -> None:
                     dsm_pre_train, dsm_post_train, _ = extract_inputs(
                         X_train, include_density=include_density, include_unc=include_unc
                     )
+                    dsm_pre_val, dsm_post_val, _ = extract_inputs(
+                        X_val, include_density=include_density, include_unc=include_unc
+                    )
                     dsm_pre_test, dsm_post_test, _ = extract_inputs(
                         X_test, include_density=include_density, include_unc=include_unc
                     )
                     feat_train = build_features(feature_func, dsm_pre_train, dsm_post_train)
+                    feat_val = build_features(feature_func, dsm_pre_val, dsm_post_val)
                     feat_test = build_features(feature_func, dsm_pre_test, dsm_post_test)
                     return functools.partial(
                         train_one,
@@ -253,6 +281,8 @@ def main() -> None:
                         num_classes=num_classes,
                         feat_train=feat_train,
                         Y_train=Y_train,
+                        feat_val=feat_val,
+                        Y_val=Y_val,
                         feat_test=feat_test,
                         Y_test=Y_test,
                         test_indices=test_indices,
@@ -264,7 +294,7 @@ def main() -> None:
                 for dsm_mode in ablation_grid["dsm_mode"]:
                     results = grid_search(
                         ablation_grid={"dsm_mode": [dsm_mode]},
-                        hpo_grid=config["hpo_grid"],
+                        hpo_grid=hpo_grid,
                         result_dir_fn=functools.partial(
                             build_result_dir, results_root, scenario, dataset_name, model_name
                         ),
