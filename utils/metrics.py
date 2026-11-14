@@ -20,6 +20,7 @@ import numpy as np
 from scipy.stats import spearmanr
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
@@ -69,6 +70,16 @@ def compute_metrics(
 
     cm = confusion_matrix(y_true, y_pred)
     return acc, prec, rec, f1, mcc_norm, cm
+
+
+def compute_balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Macro-averaged recall: the mean per-class recall, so every class counts
+    equally regardless of how many samples it has.
+
+    Kept separate from `compute_metrics` rather than appended to its tuple,
+    because callers index that tuple positionally (e.g. `[3]` for macro-F1).
+    """
+    return float(balanced_accuracy_score(y_true, y_pred))
 
 
 def compute_ordinal_metrics(
