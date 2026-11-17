@@ -1,25 +1,34 @@
 # CMF-BDANet
 
 Building damage change detection from pre-/post-event DSM (digital surface
-model) + RGB imagery. Five models are trained and compared across five
+model) + RGB imagery. Six models are trained and compared across five
 classification scenarios:
 
-- **FCSNN** — Siamese CNN over pre/post DSM tensors.
+- **FCSNN** — Siamese CNN over pre/post DSM tensors. Weight sharing between
+  the two towers is switchable (`shared`), and the two embeddings are
+  combined by one of three fusion modes (`sub`, `concat`, `mcmaf`).
 - **CMF-BDANet** — multi-modal fusion network combining DSM-difference
   features with an RGB stream (3-stream or 4-stream variants).
-- **FUJITA** — baseline Siamese CNN (from the Fujita et al. method).
+- **BDDNet** — multi-scale/residual two-stream baseline (optical + lidar).
+- **FUJITA** — baseline pseudo-Siamese CNN (Fujita et al.): two unshared
+  towers whose features are concatenated.
 - **Moya**, **Hajeb** — hand-crafted-feature SVM baselines (height-difference
   statistics).
+
+**The current study** (see [docs/EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md))
+measures the effect of pseudo-Siamese concatenation in FCSNN. It runs a staged
+protocol — hyperparameter search, then ablation, then multi-seed confirmation —
+on `dsm_only` data; see [The staged protocol](#the-staged-protocol-stages-0-3).
 
 **Scenarios** (label remapping applied to the same underlying 5-class data):
 
 | Scenario | Task | Classes | Models |
 |---|---|---|---|
-| 1 | binary | class 0 vs class 4 only (other rows dropped) | all 5 |
-| 2 | binary | classes {0,1,2,3} vs class 4 | all 5 |
-| 3 | multiclass | all 5 classes (nominal — classes are unordered categories) | all 5 |
-| 4 | binary | classes {0,1} vs {2,3,4} | all 5 |
-| 5 | ordinal regression | same 5 classes as scenario 3, but the model is trained to respect their order (0 < 1 < 2 < 3 < 4) instead of treating them as unordered categories | FCSNN, CMF-BDANet, FUJITA (not the SVM baselines, no clean CORAL-for-SVM equivalent) |
+| 1 | binary | class 0 vs class 4 only (other rows dropped) | all 6 |
+| 2 | binary | classes {0,1,2,3} vs class 4 | all 6 |
+| 3 | multiclass | all 5 classes (nominal — classes are unordered categories) | all 6 |
+| 4 | binary | classes {0,1} vs {2,3,4} | all 6 |
+| 5 | ordinal regression | same 5 classes as scenario 3, but the model is trained to respect their order (0 < 1 < 2 < 3 < 4) instead of treating them as unordered categories | FCSNN, CMF-BDANet, BDDNet, FUJITA (not the SVM baselines, no clean CORAL-for-SVM equivalent) |
 
 Scenario 5 is explained in full in [Ordinal regression (scenario 5)](#ordinal-regression-scenario-5) below.
 
@@ -29,31 +38,47 @@ Scenario 5 is explained in full in [Ordinal regression (scenario 5)](#ordinal-re
 configs/            One JSON config per model family (grid definitions)
   fcsnn.json
   cmf_bdanet.json
+  bddnet.json
   fujita.json
   svm.json           (covers both Moya and Hajeb)
 
 models/              Model definitions + shared data-loading
   fcsnn.py           FCSNN model + load_dataset() (NPZ loader used by every script)
   cmf_bdanet.py       CMF-BDANet model + DSM/RGB channel extraction + tf.data pipeline
+  bddnet.py          BDD-Net baseline model
   fujita.py          FUJITA baseline model
   ordinal.py         Shared CORAL ordinal head (CoralBiases, add_coral_head) + label
-                     encode/decode, used by fcsnn.py, cmf_bdanet.py, and fujita.py
+                     encode/decode, used by every neural-net model
   Moya.py            Moya SVM feature extractor (feature_difference)
   Hajeb.py           Hajeb SVM feature extractor (dsm_difference)
 
 utils/               Shared, model-agnostic pipeline code
   experiment.py      Determinism, callbacks, grid-search driver, shared NN train/eval loop
   label_processing.py  Scenario 1-5 label remapping + is_ordinal_scenario()
-  metrics.py         accuracy/precision/recall/macro-F1/MCC/confusion-matrix,
-                     plus ordinal MAE/QWK (compute_ordinal_metrics)
+  metrics.py         accuracy/precision/recall/macro-F1/balanced-accuracy/MCC/
+                     confusion-matrix, plus ordinal MAE/QWK (compute_ordinal_metrics)
 
 train_fcsnn.py       Grid-search entrypoint for FCSNN
 train_cmf_bdanet.py   Grid-search entrypoint for CMF-BDANet
+train_bddnet.py      Grid-search entrypoint for BDDNet
 train_fujita.py      Grid-search entrypoint for FUJITA
 train_svm.py         Grid-search entrypoint for Moya + Hajeb
 
 tools/
   aggregate_metrics.py   Cross-run aggregation: best-per-config, best-overall
+  stage_lib.py           Shared helpers for the staged protocol
+  stage0_hpo.py          Stage 0: per-cell hyperparameter search
+  stage1_ablation.py     Stage 1: FCSNN ablation + capacity control
+  stage2_confirm.py      Stage 2: multi-seed retraining, test set
+  stage3_report.py       Stage 3: the paper tables
+  stats_compare.py       Bootstrap CIs, paired bootstrap, Holm-Bonferroni
+  complexity.py, flops_curve.py   Parameter/FLOP accounting
+
+tests/
+  test_fcsnn_shapes.py   Shape/capacity self-check for models/fcsnn.py
+
+docs/
+  EXPERIMENT_PLAN.md     The protocol: what runs, in what order, and why
 
 convert_npz_compat.py   One-off tool: make a NumPy-2.x-written NPZ readable by NumPy 1.x
 
@@ -79,6 +104,10 @@ channels are active: nDSM is always included; density and uncertainty are
 each independently toggled, giving 4 modes: `dsm_density_uncertainty`,
 `dsm_density`, `dsm_uncertainty`, `dsm_only`.
 
+> The shipped configs pin `dsm_mode` to **`dsm_only`**, because that is the
+> scope of the current study. Widen the list in `configs/*.json` to bring the
+> other three modes back.
+
 If you ever hit a numpy 2.x/1.x pickle incompatibility loading an NPZ, run
 `python convert_npz_compat.py --input <in.npz> --output <out.npz>` first.
 
@@ -90,21 +119,31 @@ config's `hpo_grid` × `ablation_grid`, it trains on `X_train`/`Y_train`
 `X_test`/`Y_test`, and writes results to a config-derived directory.
 
 ```bash
-python train_fcsnn.py                                    # full grid, all scenarios
+python train_fcsnn.py                                     # full grid, all scenarios, all seeds
 python train_fcsnn.py --scenario 1                        # just scenario 1
-python train_fcsnn.py --scenario 4                        # the {0,1} vs {2,3,4} binary scenario
-python train_fcsnn.py --scenario 5 --residual true --fusion mcmaf   # ordinal regression (CORAL)
-python train_fcsnn.py --dsm-mode dsm_only                 # just one DSM mode
-python train_cmf_bdanet.py --variant 4stream                # just the 4-stream CMF-BDANet variant
-python train_cmf_bdanet.py --scenario 5                     # ordinal regression (CORAL)
-python train_fujita.py --scenario 5                        # ordinal regression (CORAL)
-python train_svm.py --model Moya --scenario 2              # just Moya, scenario 2
+python train_fcsnn.py --fusion concat --shared false      # just the pseudo-Siamese concat arm
+python train_fcsnn.py --dropout true --dense false        # pin two ablation axes
+python train_fcsnn.py --base-filters 22 --shared false    # the capacity-control width
+python train_fcsnn.py --seed 12345                        # one seed instead of all five
+python train_fcsnn.py --scenario 5                        # ordinal regression (CORAL)
+python train_cmf_bdanet.py --variant 4stream              # just the 4-stream CMF-BDANet variant
+python train_bddnet.py --base-filters 32                  # just one BDDNet width
+python train_fujita.py --scenario 5                       # ordinal regression (CORAL)
+python train_svm.py --model Moya --scenario 2             # just Moya, scenario 2
 ```
 
-Scenarios 1-4 work identically across all four scripts. Scenario 5 (ordinal
-regression via CORAL) is wired up for the three neural nets —
-`train_fcsnn.py`, `train_cmf_bdanet.py`, `train_fujita.py` all accept
-`--scenario 5` and share the same `models/ordinal.py` head. `train_svm.py`
+**Seeds are a grid axis.** Each config lists `seeds`, and the seed is part of
+every result directory, so one invocation trains every architecture/HPO combo
+once per seed and each is independently resumable. `--seed N` narrows to one.
+This is what makes the multi-seed reporting in Stage 2 possible: `seed`
+actually reaches the model's initializers and the shuffle, rather than being a
+single module-level constant.
+
+Scenarios 1-4 work identically across all five scripts. Scenario 5 (ordinal
+regression via CORAL) is wired up for the four neural nets —
+`train_fcsnn.py`, `train_cmf_bdanet.py`, `train_bddnet.py` and
+`train_fujita.py` all accept `--scenario 5` and share the same
+`models/ordinal.py` head. `train_svm.py`
 does not (`--scenario` choices are `[1,2,3,4]`) since there's no clean CORAL
 equivalent for the SVM baselines — passing `--scenario 5` to it fails fast
 with an argparse error rather than silently training something else under
@@ -124,41 +163,61 @@ Each config in `configs/` has two grids plus shared settings:
 ```jsonc
 {
   "results_root": "results",
-  "seed": 1234,
+  "seeds": [12345, 23451, 34512, 45123, 51234],
   "epochs": 100,
-  "scenarios": [1, 2, 3, 4],       // cmf_bdanet.json also includes 5 (ordinal)
-  "datasets": { "dataset_16": "Dataset/NPZ/dataset_16.npz" },
+  "scenarios": [1, 2, 3, 4, 5],
+  "datasets": { "dataset_16": "Dataset/NPZ_spatial/dataset_16.npz" },
   "callbacks": { "early_stopping_patience": 12, "lr_reduce_patience": 6, ... },
 
   "ablation_grid": {                 // model/architecture variants
-    "dsm_mode": ["dsm_density_uncertainty", "dsm_density", "dsm_uncertainty", "dsm_only"],
-    "residual": [true, false],
-    "fusion": ["concat", "mcmaf"]
+    "dsm_mode": ["dsm_only"],
+    "fusion": ["sub", "concat"],     // "mcmaf" is implemented but not in the grid
+    "shared": [true, false],
+    "dropout": [true, false],
+    "dense": [true, false],
+    "base_filters": [32]
   },
   "hpo_grid": {                      // hyperparameter tuning
-    "optimizer": ["Adam", "SGD", "RMSprop", "Nadam", "Adamax"],
+    "optimizer": ["Adam", "Nadam", "SGD"],
     "learning_rate": [0.0001, 0.001],
-    "batch_size": [256, 128, 64]
+    "batch_size": [64, 128, 256]
+  },
+  "capacity_control": {              // FCSNN only; not a reported arm
+    "shared": false,
+    "base_filters": 22
   }
 }
 ```
 
-- `ablation_grid` — architecture/data variants you're comparing (dsm_mode
-  everywhere; `residual`/`fusion` for FCSNN and CMF-BDANet; `variant`
-  — `3stream_concat`/`3stream_no_concat`/`4stream` — for CMF-BDANet only).
+- `ablation_grid` — architecture/data variants you're comparing. For FCSNN
+  that is `fusion` / `shared` / `dropout` / `dense` (16 configs); `variant`
+  — `3stream_concat`/`3stream_no_concat`/`4stream` — for CMF-BDANet;
+  `base_filters` for BDDNet.
 - `hpo_grid` — pure hyperparameter tuning: optimizer/lr/batch_size for the
-  neural nets, kernel/decision_function/C/gamma for the SVMs.
-- Edit these lists to narrow or widen a sweep; `--scenario`/`--dsm-mode`
-  CLI flags exist for quick one-off filtering without editing the file.
+  neural nets, kernel/decision_function/C/gamma for the SVMs. `seeds` is
+  merged into this grid at run time.
+- `capacity_control` — the parameter-matched width for FCSNN's capacity
+  control: two unshared towers at `bf=22` come to 1.038x one shared tower at
+  `bf=32` (verified by `tests/test_fcsnn_shapes.py`). See
+  [The staged protocol](#the-staged-protocol-stages-0-3).
+- Edit these lists to narrow or widen a sweep; the CLI flags above exist for
+  quick one-off filtering without editing the file.
+
+**There is no class weighting anywhere**, including in the SVM baselines —
+it was removed deliberately so every model is trained under the same
+conditions. `train_svm.py` previously passed `class_weight="balanced"` to
+`SVC`; it no longer does.
 
 ## What gets saved per run
 
 Every run's result directory (e.g.
-`results/scenario_1/FCSNN/dataset_16/dsm_only/residual_True/fusion_concat/Adam_lr0.0001_bs256/`)
+`results/scenario_1/FCSNN/dataset_16/dsm_only/fusion_concat/shared_False/bf32/do_True/dense_True/Adam_lr0.0001_bs128/seed_12345/`)
 contains:
 
-- `metrics.csv` — one row: every grid parameter + accuracy/precision/recall/
-  macro-F1/macro-F2/MCC/confusion-matrix cells/train time/etc. Presence of
+- `metrics.csv` — one row: every grid parameter (including `seed` and
+  `params`, the model's parameter count) + accuracy/precision/recall/
+  macro-F1/macro-F2/balanced-accuracy/MCC/confusion-matrix cells/train
+  time/etc. Presence of
   this file is what marks the run "done". Scenario 5 (ordinal) rows add six
   more columns (`mae`, `rmse`, `off_by_one_accuracy`, `qwk`, `linear_kappa`,
   `spearman`) alongside the standard ones — see
@@ -173,13 +232,19 @@ contains:
 - Model artifact: `model.keras` + `weights.h5` (+ `best_weights.weights.h5`
   from the checkpoint callback) for the neural nets, `model.pkl` for the SVMs.
 
-Directory shape per model:
+Directory shape per model (every one ends in `seed_<n>/`):
 ```
-FCSNN:        scenario_N/FCSNN/<dataset>/<dsm_mode>/residual_<bool>/fusion_<tag>/<opt>_lr<lr>_bs<bs>/
-CMF-BDANet:   scenario_N/CMF/<dataset>/<dsm_mode>/<variant>/residual_<bool>/fusion_<tag>/<opt>_lr<lr>_bs<bs>/
-FUJITA:       scenario_N/FUJITA/<dataset>/<dsm_mode>/<opt>_lr<lr>_bs<bs>/
-Moya/Hajeb:   scenario_N/<Moya|Hajeb>/<dataset>/<dsm_mode>/dec_<f>_kernel_<k>_C_<c>_gamma_<g>/
+FCSNN:        scenario_N/FCSNN/<dataset>/<dsm_mode>/fusion_<tag>/shared_<bool>/bf<n>/do_<bool>/dense_<bool>/<opt>_lr<lr>_bs<bs>/seed_<n>/
+CMF-BDANet:   scenario_N/CMF/<dataset>/<dsm_mode>/<variant>/residual_<bool>/fusion_<tag>/<opt>_lr<lr>_bs<bs>/seed_<n>/
+BDDNet:       scenario_N/BDD/<dataset>/<dsm_mode>/base_filters_<n>/<opt>_lr<lr>_bs<bs>/seed_<n>/
+FUJITA:       scenario_N/FUJITA/<dataset>/<dsm_mode>/<opt>_lr<lr>_bs<bs>/seed_<n>/
+Moya/Hajeb:   scenario_N/<Moya|Hajeb>/<dataset>/<dsm_mode>/dec_<f>_kernel_<k>_C_<c>_gamma_<g>/seed_<n>/
 ```
+
+One layout serves all three stages of the protocol below, which is what lets a
+later stage reuse an earlier stage's runs instead of retraining them: the path
+encodes every parameter, so `metrics.csv` existing is a complete "already
+done" check.
 
 ## Aggregating results
 
@@ -187,8 +252,13 @@ Moya/Hajeb:   scenario_N/<Moya|Hajeb>/<dataset>/<dsm_mode>/dec_<f>_kernel_<k>_C_
 and produces two tables:
 
 ```bash
-python tools/aggregate_metrics.py --results results --best-metric f1
+python tools/aggregate_metrics.py --results results --best-metric f2
 ```
+
+`--best-metric` defaults to **f2**, matching the metric training monitors
+(see [Selection metric](#selection-metric-macro-f2)). Pass `f1` for the old
+behaviour. `seed` is treated as a bookkeeping column, so runs that differ only
+by seed collapse into one group rather than fragmenting it.
 
 1. **`aggregated_metrics.csv`** — collapses the hyperparameter grid down to
    the single best HPO combo per `(model, scenario, dataset, ablation-config)`
@@ -218,6 +288,95 @@ unconditional (it re-scans even if every run in this invocation was skipped
 as already-trained, since the point is to keep the aggregate current, not to
 gate it on this specific invocation having done new work).
 
+## Selection metric: macro-F2
+
+Every selection in the pipeline — checkpointing, early stopping, LR-plateau
+reduction, and which config wins a stage — is made on **validation macro-F2**
+(`val_f2`), not macro-F1. F2 weights recall four times precision, which is the
+right bias for damage assessment: a missed damaged building costs more than a
+false alarm.
+
+`macro_f1` is still computed and saved alongside `macro_f2` in every
+`metrics.csv`, so the F1 view of any run remains available — it simply no
+longer drives selection. Ordinal runs (scenario 5) override this with QWK
+(`val_qwk`), for the reasons in
+[Ordinal regression](#ordinal-regression-scenario-5).
+
+One consequence worth stating in a write-up: selection now favours
+higher-recall, lower-precision models, and configs chosen under F2 may differ
+from those an F1-selected run would have picked.
+
+## The staged protocol (stages 0-3)
+
+The `train_*.py` scripts above run whatever grid their config names. The
+`tools/stage*.py` scripts sit on top and run them in the order the study
+needs, so that **nothing is ever selected on the test set**:
+
+```bash
+python tools/stage0_hpo.py        # per-cell hyperparameter search  (validation only, 1 seed)
+```
+
+```bash
+python tools/stage1_ablation.py   # FCSNN ablation + capacity control (validation only, 1 seed)
+```
+
+```bash
+python tools/stage2_confirm.py    # retrain every arm on all 5 seeds, evaluate on test
+```
+
+```bash
+python tools/stage3_report.py     # the paper tables
+```
+
+| Stage | What it does | Output |
+|---|---|---|
+| 0 | Searches the HPO grid once per *cell* — for FCSNN, each `(sharing x fusion)` combination, plus the capacity-control width. Tuning per cell matters because the study compares those cells against each other, so hyperparameters chosen on one arm and applied to its competitor would bias the comparison. | `results/stage0_hpo.csv` |
+| 1 | With hyperparameters frozen, runs the 16-config FCSNN ablation and picks each cell's best. Then the capacity control: the winning fusion, unshared, at the parameter-matched width. | `results/stage1_winners.csv` |
+| 2 | Retrains every arm on all five seeds, each stopping independently on its own validation curve, and evaluates the test split once per seed. | per-run `metrics.csv` |
+| 3 | Aggregates into the paper tables. | `results/paper/` |
+
+Common flags: `--scenarios 1,2` on every stage; `--select-only` (stages 0-1)
+re-runs the selection without retraining; `--dry-run` (stage 2) lists the
+invocations it would make.
+
+The stage scripts do not reimplement training. Each narrows a model's config —
+pinning the ablation axes and hyperparameters for one cell — writes it to
+`results/_stage_configs/`, and invokes the existing `train_*.py` with
+`--config`. Selection then reads the resulting `metrics.csv` files back.
+
+### What Stage 3 produces
+
+- **`table_main_scenario_N.csv`** — cross-model comparison, 8 rows: the four
+  FCSNN cell winners plus BDDNet, Fujita, Moya and Hajeb.
+- **`table_ablation_scenario_N.csv`** — FCSNN only, 17 rows: all 16 ablation
+  configs plus the capacity control (`control=True`), with the validation
+  score that drove selection and an `is_cell_winner` flag.
+- **`table_hpo.csv`** — Stage-0 winning hyperparameters, for a
+  reproducibility appendix.
+- **`significance.csv`** — paired-bootstrap p-values, Holm-Bonferroni
+  corrected.
+
+Both tables are also written combined across scenarios, and carry mean ± std
+across seeds plus a bootstrap 95% CI for every metric.
+
+### The capacity control
+
+Unshared (pseudo-Siamese) FCSNN has two independent towers, so ~2x the
+parameters of the shared version. A win could therefore be *architecture*
+(separate weights letting each tower specialise on pre- vs post-event DSM) or
+simply *capacity*. The control holds parameters fixed — two unshared towers at
+`base_filters=22` come to 1.038x one shared tower at 32 — so a win that
+survives there is attributable to weight sharing rather than budget. It is
+tuned at its own width in Stage 0, so "it was tuned for a wider model" is not
+available as an explanation for its result.
+
+Note that halving the width would *not* have matched parameters: conv
+parameters scale with `C_in x C_out`, so `bf=16` gives only 0.61x. Run
+`python tests/test_fcsnn_shapes.py` to print the exact counts.
+
+The `sub` vs `concat` comparison is unaffected by any of this — those arms
+have identical tower parameters and differ only in the fusion head.
+
 ## Ordinal regression (scenario 5)
 
 ### The problem with plain multiclass for ordered classes
@@ -232,8 +391,8 @@ increasing damage severity — so a model that mixes up adjacent classes
 (1 vs 2) is behaving much better than one that mixes up opposite ends (0 vs
 4), and neither the loss nor accuracy/macro-F1 can tell the difference.
 Scenario 5 reuses scenario 3's exact data but trains and evaluates the model
-in a way that's aware of this order. It's available for all three neural
-nets — FCSNN, CMF-BDANet, FUJITA — all sharing the same CORAL head from
+in a way that's aware of this order. It's available for all four neural
+nets — FCSNN, CMF-BDANet, BDDNet, FUJITA — all sharing the same CORAL head from
 `models/ordinal.py`. It's not available for the SVM baselines (Moya/Hajeb):
 `SVC` has no clean CORAL-style ordinal equivalent, so `train_svm.py`
 doesn't accept `--scenario 5`.
@@ -288,8 +447,9 @@ a logical contradiction (if it's worse than 2, it must also be worse than
 - `add_coral_head(x, num_classes)` in `models/ordinal.py` wires the shared
   `Dense(1, use_bias=False)` + `CoralBiases` pair onto a model's penultimate
   feature tensor `x` in one call — `models/fcsnn.py`, `models/cmf_bdanet.py`,
-  and `models/fujita.py` all use this same function for their `ordinal=True`
-  head, so there's exactly one CORAL implementation, not three.
+  `models/bddnet.py` and `models/fujita.py` all use this same function for
+  their `ordinal=True` head, so there is exactly one CORAL implementation,
+  not four.
 
 ### The loss function
 
@@ -386,27 +546,27 @@ gets reported afterward:
   training run tracks a validation metric each epoch (via
   `make_training_callbacks` in `utils/experiment.py`) that drives
   `ModelCheckpoint`, `EarlyStopping`, and `ReduceLROnPlateau` alike. For
-  nominal scenarios this is macro-F1 (`val_f1`), same as before. For
-  ordinal scenarios it's **QWK** (`val_qwk`, via
-  `models/ordinal.py::ordinal_monitor_metric`) instead — macro-F1 on
-  decoded ranks would treat every misclassification as equally bad, which
-  defeats the purpose of training an ordinal-aware model in the first
-  place. Both `train_and_evaluate_nn` and `make_training_callbacks` accept
-  `monitor_name`/`monitor_fn` to make this swap, and default to the
-  original macro-F1 behavior when unset.
+  nominal scenarios this is macro-F2 (`val_f2`, see
+  [Selection metric](#selection-metric-macro-f2)). For ordinal scenarios it's
+  **QWK** (`val_qwk`, via `models/ordinal.py::ordinal_monitor_metric`)
+  instead — an F-measure on decoded ranks would treat every misclassification
+  as equally bad, which defeats the purpose of training an ordinal-aware
+  model in the first place. Both `train_and_evaluate_nn` and
+  `make_training_callbacks` accept `monitor_name`/`monitor_fn` to make this
+  swap, and default to `val_f2` when unset.
 - **Per-epoch console line.** Follows directly from the above: you'll see
-  `- val_f1: 0.8123` per epoch for nominal runs and `- val_qwk: 0.9012` for
+  `- val_f2: 0.8123` per epoch for nominal runs and `- val_qwk: 0.9012` for
   ordinal ones.
 - **End-of-run console line.** `train_and_evaluate_nn` accepts a
-  `summary_log_fn` hook (default prints `ACC=.. F1=.. MCC=..`); ordinal
+  `summary_log_fn` hook (default prints `ACC=.. F1=.. F2=.. BAcc=.. MCC=..`); ordinal
   scenarios use `models/ordinal.py::ordinal_summary_log`, which prints
   `ACC=.. MAE=.. QWK=.. OffByOne=..` instead — the full six-metric set
   still lands in `metrics.csv` either way, this only changes what's
   concise enough to scan in the terminal.
 - **`metrics.csv` schema note:** the "best value achieved during training"
-  column is named `best_val_metric` (previously `best_val_f1`) since it now
-  holds either a macro-F1 or a QWK value depending on the run; the
-  `monitor_metric` column next to it always names which one.
+  column is named `best_val_metric` since it holds either a macro-F2 or a QWK
+  value depending on the run; the `monitor_metric` column next to it always
+  names which one. This is the column every stage selects on.
 
 ## Shared pipeline code (`utils/experiment.py`)
 
@@ -419,34 +579,54 @@ This is the module every `train_*.py` script is built on:
   shared by FCSNN and FUJITA (both take the same two-tensor input shape).
   Accepts the same `ordinal`/`num_classes` pair as `models/cmf_bdanet.py`'s
   `make_dataset()` to CORAL-encode `Y` before building the dataset.
+- `MONITOR_METRIC` — the one place `"val_f2"` is defined; everything that
+  monitors or selects reads it.
 - `make_training_callbacks()` — early stopping / checkpointing / LR
   reduction, all monitoring a custom validation metric computed each epoch
-  (not `val_loss`) — macro-F1 (`val_f1`) by default, QWK (`val_qwk`) for
+  (not `val_loss`) — macro-F2 (`val_f2`) by default, QWK (`val_qwk`) for
   ordinal runs. Accepts optional `decode_pred_fn`/`decode_true_fn` hooks so
   the metric can be computed correctly even when the model's raw output
   isn't a plain sigmoid/softmax (e.g. CORAL's threshold probabilities), and
-  `monitor_name`/`monitor_fn` to swap which metric is tracked — defaults
-  reproduce the original macro-F1/threshold/argmax behavior.
+  `monitor_name`/`monitor_fn` to swap which metric is tracked.
 - `train_and_evaluate_nn()` — the full compile → fit → evaluate → save
-  loop shared by FCSNN, CMF-BDANet, and FUJITA. Each script only builds its
+  loop shared by FCSNN, CMF-BDANet, BDDNet, and FUJITA. Each script only builds its
   own datasets + model and calls this once; it returns the summary dict
   that becomes the `metrics.csv` row. (`train_svm.py` doesn't use this —
   no epochs/validation/callbacks for an SVM — it has its own equivalent
   logic inline.) Eight optional parameters — `loss`, `decode_pred_fn`,
   `decode_true_fn`, `class_probs_fn`, `extra_metrics_fn`, `monitor_name`,
-  `monitor_fn`, `summary_log_fn` — all default to `None` (or the historical
-  macro-F1 behavior) and reproduce today's nominal-classification behavior
-  exactly; `train_fcsnn.py`/`train_cmf_bdanet.py`/`train_fujita.py` each
-  supply CORAL-specific versions of all eight (from `models/ordinal.py`)
-  only when `is_ordinal_scenario(scenario)` is true.
-- `grid_search()` — iterates `ablation_grid × hpo_grid`, builds each run's
-  result directory, skips already-trained combos, and catches/logs
-  per-run exceptions without aborting the whole sweep.
+  `monitor_fn`, `summary_log_fn` — all default to `None` (or `val_f2`) and
+  give plain nominal-classification behaviour; each `train_*.py` supplies
+  CORAL-specific versions of all eight (from `models/ordinal.py`) only when
+  `is_ordinal_scenario(scenario)` is true.
+- `grid_search()` — iterates `ablation_grid × hpo_grid` (with `seeds` merged
+  into the latter), builds each run's result directory, skips already-trained
+  combos, and catches/logs per-run exceptions without aborting the whole
+  sweep.
 - `build_predictions_frame()`, `compute_f2()`, `save_classification_report()`
   — shared result-saving helpers used identically by every script.
 - `aggregate_scenarios_after_run()` — called once at the end of every
   script's `main()`; re-aggregates each scenario the run touched (see
   [Aggregating results](#aggregating-results)).
+
+## Tests
+
+```bash
+python tests/test_fcsnn_shapes.py
+```
+
+Plain `assert` + `__main__`, no framework. It checks what the protocol
+depends on: all three fusion modes build; unshared has ~2x the parameters of
+shared; the capacity-control width lands within 10% of the shared model;
+`sub` and `concat` have identical tower parameters (so that comparison is not
+confounded by capacity); the `dropout`/`dense` flags change the graph; the
+same seed reproduces and different seeds don't; and the two unshared towers
+start from *different* weights. It also prints the exact parameter count per
+arm — that is what the `params` column reports, and what re-pins the control
+width if the arithmetic ever changes.
+
+`python tools/stats_compare.py` runs its own self-check of the bootstrap CI,
+the paired bootstrap, and the Holm-Bonferroni correction.
 
 ## Archive
 
