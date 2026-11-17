@@ -42,6 +42,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from tools.stage_lib import (  # noqa: E402
+    REPORT_BF,
     ROOT,
     SVM_MODELS,
     as_bool,
@@ -285,7 +286,7 @@ def aggregate_a(
                 & (runs["shared"].map(as_bool) == as_bool(arm["shared"]))
                 & (runs["dropout"].map(as_bool) == as_bool(arm["dropout"]))
                 & (runs["dense"].map(as_bool) == as_bool(arm["dense"]))
-                & (pd.to_numeric(runs["base_filters"], errors="coerce") == 32)
+                & (pd.to_numeric(runs["base_filters"], errors="coerce") == REPORT_BF)
             ]
         elif model == "BDD" and "base_filters" in runs.columns:
             runs = runs[pd.to_numeric(runs["base_filters"], errors="coerce") == int(arm["base_filters"])]

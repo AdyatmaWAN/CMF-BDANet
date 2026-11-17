@@ -42,11 +42,13 @@ from tools.stage_lib import (  # noqa: E402
     FCSNN_CELLS,
     FIRST_SEED,
     NN_MODELS,
+    REPORT_BF,
     ROOT,
     SVM_MODELS,
     as_bool,
     cell_tag,
     collect_runs,
+    control_bf,
     hpo_from_row,
     load_config,
     narrowed_config,
@@ -71,12 +73,18 @@ def load_stage0() -> pd.DataFrame:
 
 
 def fcsnn_hpo(stage0: pd.DataFrame, scenario: int, cell: dict) -> dict | None:
-    """The hyperparameters Stage 0 chose for one (scenario, cell)."""
+    """The hyperparameters Stage 0 chose for one (scenario, cell).
+
+    `base_filters` is part of the cell identity: the capacity control was tuned
+    at its own width, so matching on fusion/shared alone would hand it bf=32's
+    hyperparameters and undo the reason it was tuned separately.
+    """
     match = stage0[
         (stage0["model"] == "FCSNN")
         & (stage0["scenario"] == scenario)
         & (stage0["fusion"] == cell["fusion"])
         & (stage0["shared"].map(as_bool) == cell["shared"])
+        & (pd.to_numeric(stage0["base_filters"], errors="coerce") == cell["base_filters"])
     ]
     if match.empty:
         print(f"  !! no Stage-0 winner for scenario {scenario} {cell_tag(cell)} — skipping")
@@ -98,7 +106,7 @@ def train_ablation(stage0: pd.DataFrame, scenarios) -> None:
                 ablation={
                     "fusion": [cell["fusion"]],
                     "shared": [cell["shared"]],
-                    "base_filters": [32],
+                    "base_filters": [cell["base_filters"]],
                     **ABLATION_AXES,
                 },
                 hpo=hpo,
@@ -112,7 +120,7 @@ def select_cell_winners(scenarios) -> pd.DataFrame:
     fcsnn = df[df["model"] == "FCSNN"] if not df.empty else df
     if fcsnn.empty:
         raise SystemExit("No FCSNN runs found — run Stage 1 training first.")
-    reported = fcsnn[pd.to_numeric(fcsnn["base_filters"], errors="coerce") == 32]
+    reported = fcsnn[pd.to_numeric(fcsnn["base_filters"], errors="coerce") == REPORT_BF]
     best = pick_best(reported, ["scenario", "fusion", "shared"])
     best["arm"] = best.apply(
         lambda r: f"FCSNN {'shared' if as_bool(r['shared']) else 'unshared'} + {r['fusion']}", axis=1
@@ -123,45 +131,75 @@ def select_cell_winners(scenarios) -> pd.DataFrame:
 
 def train_control(cell_winners: pd.DataFrame, stage0: pd.DataFrame, scenarios) -> None:
     """Capacity control: winning fusion, unshared, parameter-matched width."""
-    control_bf = load_config(FCSNN_CONFIG)["capacity_control"]["base_filters"]
+    bf = control_bf()
+    winners = winning_fusion_per_scenario(cell_winners)
     for scenario in scenarios:
-        rows = cell_winners[cell_winners["scenario"] == scenario]
-        if rows.empty:
+        if scenario not in winners:
             continue
-        winning_fusion = rows.loc[rows["best_val_metric"].idxmax(), "fusion"]
-        cell = {"fusion": winning_fusion, "shared": False}
+        winning_fusion = winners[scenario]
+        # Stage 0 tuned both control fusions; take the one that won, with its
+        # own hyperparameters rather than bf=32's.
+        cell = {"fusion": winning_fusion, "shared": False, "base_filters": bf}
         hpo = fcsnn_hpo(stage0, scenario, cell)
         if hpo is None:
             continue
-        print(f"  scenario {scenario}: winning fusion = {winning_fusion}, control at bf={control_bf}")
+        print(f"  scenario {scenario}: winning fusion = {winning_fusion}, control at bf={bf}")
         cfg = narrowed_config(
             FCSNN_CONFIG,
             scenarios=[scenario],
             ablation={
                 "fusion": [winning_fusion],
                 "shared": [False],
-                "base_filters": [control_bf],
+                "base_filters": [bf],
                 **ABLATION_AXES,
             },
             hpo=hpo,
             seeds=[FIRST_SEED],
         )
-        run_trainer(FCSNN_SCRIPT, cfg, f"stage1_s{scenario}_control_bf{control_bf}")
+        run_trainer(FCSNN_SCRIPT, cfg, f"stage1_s{scenario}_control_bf{bf}")
 
 
-def select_control(scenarios) -> pd.DataFrame:
-    control_bf = load_config(FCSNN_CONFIG)["capacity_control"]["base_filters"]
+def winning_fusion_per_scenario(cell_winners: pd.DataFrame) -> dict:
+    """The fusion with the best cell winner, per scenario. This is the single
+    source of truth for which control arm is reported — both `train_control`
+    and `select_control` read it, so they cannot disagree."""
+    out = {}
+    for scenario, rows in cell_winners.groupby("scenario"):
+        out[scenario] = rows.loc[rows["best_val_metric"].idxmax(), "fusion"]
+    return out
+
+
+def select_control(scenarios, cell_winners: pd.DataFrame) -> pd.DataFrame:
+    """The single best capacity-control config per scenario.
+
+    Stage 0 tuned the control at *both* fusions, so `results/` holds bf=22 runs
+    for the losing fusion too. Those are not a reported arm: filter to the
+    winning fusion explicitly rather than inferring it from how many runs each
+    has, which would be a 21-vs-18 coin flip after a real Stage 1.
+    """
+    bf = control_bf()
     df = collect_runs(scenarios=scenarios)
     if df.empty or "base_filters" not in df.columns:
         return pd.DataFrame()
     ctrl = df[
         (df["model"] == "FCSNN")
-        & (pd.to_numeric(df["base_filters"], errors="coerce") == control_bf)
+        & (pd.to_numeric(df["base_filters"], errors="coerce") == bf)
     ]
     if ctrl.empty:
         return pd.DataFrame()
-    best = pick_best(ctrl, ["scenario"])
-    best["arm"] = f"FCSNN capacity control (bf={control_bf})"
+
+    winners = winning_fusion_per_scenario(cell_winners)
+    kept = [
+        group[group["fusion"] == winners[scenario]]
+        for scenario, group in ctrl.groupby("scenario")
+        if scenario in winners
+    ]
+    kept = [k for k in kept if not k.empty]
+    if not kept:
+        return pd.DataFrame()
+
+    best = pick_best(pd.concat(kept), ["scenario"])
+    best["arm"] = f"FCSNN capacity control (bf={bf})"
     best["control"] = True
     return best
 
@@ -208,7 +246,7 @@ def main() -> None:
     if not args.no_control:
         if not args.select_only:
             train_control(cell_winners, stage0, scenarios)
-        control = select_control(scenarios)
+        control = select_control(scenarios, cell_winners)
 
     parts = [p_ for p_ in (cell_winners, control, baseline_arms(scenarios)) if not p_.empty]
     winners = pd.concat(parts, ignore_index=True)

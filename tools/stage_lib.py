@@ -35,12 +35,38 @@ NN_MODELS: Dict[str, tuple[str, str]] = {
 SVM_MODELS = ("Moya", "Hajeb")
 SVM_SCRIPT, SVM_CONFIG = "train_svm.py", "configs/svm.json"
 
-# The four reported FCSNN arms: one per (sharing x fusion) cell.
+REPORT_BF = 32
+
+
+def control_bf() -> int:
+    """The parameter-matched width for the capacity control, from the config."""
+    return int(load_config("configs/fcsnn.json")["capacity_control"]["base_filters"])
+
+
+# The four reported FCSNN arms: one per (sharing x fusion) cell, at bf=32.
 FCSNN_CELLS: List[Dict] = [
-    {"shared": shared, "fusion": fusion}
+    {"shared": shared, "fusion": fusion, "base_filters": REPORT_BF}
     for fusion in ("sub", "concat")
     for shared in (True, False)
 ]
+
+
+def fcsnn_control_cells() -> List[Dict]:
+    """The capacity-control cells: unshared at the matched width, one per
+    fusion.
+
+    Both fusions are tuned in Stage 0 even though only the winning one is
+    reported, because Stage 0 runs before Stage 1 has decided which fusion
+    wins. Tuning the control in its own right is the point: a narrower network
+    can genuinely prefer a different learning rate or batch size, so inheriting
+    bf=32's hyperparameters would leave "the control was tuned for a wider
+    model" as an alternative explanation for any gap.
+    """
+    bf = control_bf()
+    return [
+        {"shared": False, "fusion": fusion, "base_filters": bf}
+        for fusion in ("sub", "concat")
+    ]
 
 # Hyperparameter columns a cell's winner pins for later stages.
 HPO_KEYS = ("optimizer", "learning_rate", "batch_size")
@@ -49,7 +75,7 @@ SELECT_COLUMN = "best_val_metric"
 
 
 def cell_tag(cell: Dict) -> str:
-    return f"fusion_{cell['fusion']}_shared_{cell['shared']}"
+    return f"fusion_{cell['fusion']}_shared_{cell['shared']}_bf{cell['base_filters']}"
 
 
 # ============================================================

@@ -39,11 +39,14 @@ from tools.stage_lib import (  # noqa: E402
     FCSNN_CELLS,
     FIRST_SEED,
     NN_MODELS,
+    REPORT_BF,
     SVM_CONFIG,
     SVM_MODELS,
     SVM_SCRIPT,
     cell_tag,
     collect_runs,
+    control_bf,
+    fcsnn_control_cells,
     load_config,
     narrowed_config,
     parse_scenarios,
@@ -54,20 +57,26 @@ from tools.stage_lib import (  # noqa: E402
 
 ALL_MODELS = (*NN_MODELS, *SVM_MODELS)
 
-# Reference architecture per cell: dropout and dense on, residual on, bf=32.
-FCSNN_REFERENCE = {"dropout": [True], "dense": [True], "base_filters": [32]}
+# Reference architecture per cell: dropout and dense on, residual on. The
+# width comes from the cell itself (32 for reported cells, the matched width
+# for the capacity-control cells).
+FCSNN_REFERENCE = {"dropout": [True], "dense": [True]}
 
 
 def train(models, scenarios) -> None:
     for model in models:
         if model == "FCSNN":
-            for cell in FCSNN_CELLS:
+            # The 4 reported cells at bf=32, plus the 2 capacity-control cells
+            # at the matched width so the control gets hyperparameters tuned
+            # for its own size rather than inheriting bf=32's.
+            for cell in [*FCSNN_CELLS, *fcsnn_control_cells()]:
                 cfg = narrowed_config(
                     NN_MODELS["FCSNN"][1],
                     scenarios=scenarios,
                     ablation={
                         "fusion": [cell["fusion"]],
                         "shared": [cell["shared"]],
+                        "base_filters": [cell["base_filters"]],
                         **FCSNN_REFERENCE,
                     },
                     seeds=[FIRST_SEED],
@@ -115,13 +124,19 @@ def select(models, scenarios) -> pd.DataFrame:
     if not fcsnn.empty:
         # Restrict to the reference architecture so a Stage-1 ablation run does
         # not get mistaken for an HPO candidate when this is re-selected later.
+        # Widths are kept separate: bf=32 and the control width are different
+        # cells with their own hyperparameters, not candidates for one another.
+        widths = [REPORT_BF, control_bf()]
         ref = fcsnn[
             fcsnn["dropout"].astype(str).str.lower().eq("true")
             & fcsnn["dense"].astype(str).str.lower().eq("true")
-            & (pd.to_numeric(fcsnn["base_filters"], errors="coerce") == 32)
+            & pd.to_numeric(fcsnn["base_filters"], errors="coerce").isin(widths)
         ]
-        best = pick_best(ref, ["scenario", "model", "fusion", "shared"])
-        best["cell"] = best.apply(lambda r: f"fusion_{r['fusion']}_shared_{r['shared']}", axis=1)
+        best = pick_best(ref, ["scenario", "model", "fusion", "shared", "base_filters"])
+        best["base_filters"] = pd.to_numeric(best["base_filters"], errors="coerce").astype("Int64")
+        best["cell"] = best.apply(
+            lambda r: f"fusion_{r['fusion']}_shared_{r['shared']}_bf{r['base_filters']}", axis=1
+        )
         winners.append(best)
 
     bdd = df[df["model"] == "BDD"]

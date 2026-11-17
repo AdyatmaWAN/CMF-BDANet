@@ -97,7 +97,7 @@ def fcsnn_jobs(stage1: pd.DataFrame, scenarios, winners_only: bool):
                         ablation={
                             "fusion": [cell["fusion"]],
                             "shared": [cell["shared"]],
-                            "base_filters": [32],
+                            "base_filters": [cell["base_filters"]],
                             **ablation,
                         },
                         hpo=hpo_from_row(row),
